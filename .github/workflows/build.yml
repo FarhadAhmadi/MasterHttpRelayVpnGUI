@@ -1,42 +1,24 @@
-name: Build & Release
-
-on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
   build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
 
-      - name: Build project
-        run: |
-          dotnet restore
-          dotnet publish -c Release -r win-x64 --self-contained true -o build
+      - name: Restore
+        run: dotnet restore gui/MasterRelayVPN.csproj
 
-      - name: Zip output
+      - name: Publish
+        run: dotnet publish gui/MasterRelayVPN.csproj -c Release -r win-x64 --self-contained true -o build
+
+      - name: Zip
         run: Compress-Archive -Path build/* -DestinationPath MasterRelayVPN.zip
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: MasterRelayVPN
-          path: MasterRelayVPN.zip
-
-      - name: Create Release
+      - name: Release
         uses: softprops/action-gh-release@v2
         with:
           files: MasterRelayVPN.zip
