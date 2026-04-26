@@ -1,0 +1,32 @@
+name: Build MasterRelayVPN
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore dependencies
+        run: dotnet restore gui/MasterRelayVPN.csproj
+
+      - name: Build Release
+        run: dotnet publish gui/MasterRelayVPN.csproj -c Release -r win-x64 --self-contained true -o build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MasterRelayVPN
+          path: build/
