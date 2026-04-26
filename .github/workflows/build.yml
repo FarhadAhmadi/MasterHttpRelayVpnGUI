@@ -1,0 +1,43 @@
+name: Build Windows App
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore gui/MasterRelayVPN.csproj
+
+      - name: Build Release
+        run: dotnet publish gui/MasterRelayVPN.csproj -c Release -r win-x64 --self-contained true -o output
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MasterRelayVPN
+          path: output/
+
+      - name: Create ZIP
+        run: |
+          powershell Compress-Archive output/* MasterRelayVPN.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: MasterRelayVPN.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
