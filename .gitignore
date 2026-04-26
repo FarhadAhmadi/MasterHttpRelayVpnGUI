@@ -1,0 +1,29 @@
+# Build artifacts
+dist/
+build/core-dist/
+gui/bin/
+gui/obj/
+
+# PyInstaller working files
+MasterHttpRelayVPN/
+__pycache__/
+*.pyc
+*.pyo
+*.spec
+
+# Python venvs
+.venv/
+venv/
+
+# CA outputs (regenerated on demand)
+ca/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+*.bak

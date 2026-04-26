@@ -1,0 +1,15 @@
+<Application x:Class="MasterRelayVPN.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:svc="clr-namespace:MasterRelayVPN.Services"
+             StartupUri="Views/MainWindow.xaml">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Themes/Forest.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+            <svc:BoolToVisibleConverter   x:Key="BoolToVisible"/>
+            <svc:StringToVisibleConverter x:Key="StringToVisible"/>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>
