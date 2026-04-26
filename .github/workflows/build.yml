@@ -28,26 +28,26 @@ jobs:
           dotnet-version: "8.0.x"
 
       - name: Build project
+        # Using **/*.csproj automatically finds your project file in any subfolder
         run: |
-          dotnet restore
-          dotnet publish -c Release -r win-x64 --self-contained true -o build
+          dotnet restore **/*.csproj
+          dotnet publish **/*.csproj -c Release -r win-x64 --self-contained true -o build_output
 
       - name: Zip output
-        # Fixed for Windows PowerShell compatibility
-        run: Compress-Archive -Path .\build\* -DestinationPath MasterRelayVPN.zip
+        # Zips everything inside the build_output folder
+        run: Compress-Archive -Path .\build_output\* -DestinationPath MasterRelayVPN.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MasterRelayVPN
+          name: MasterRelayVPN-Artifact
           path: MasterRelayVPN.zip
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          # This line tells it to use the manual input tag IF you clicked "Run workflow", 
-          # otherwise it uses the standard push tag automatically.
           tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
           files: MasterRelayVPN.zip
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
