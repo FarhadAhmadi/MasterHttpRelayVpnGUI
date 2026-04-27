@@ -1,22 +1,32 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net.NetworkInformation;
 using System.Threading;
 using System.Threading.Tasks;
 using MasterRelayVPN.Models;
 
 namespace MasterRelayVPN.Services;
 
-/// <summary>
-/// Auto Optimize: samples download speed for ~10s after Start, then nudges
-/// chunk_size/max_parallel up or down on the next save. Keeps things bounded
-/// so a bad sample can't push values into pathological territory.
-/// </summary>
-public class AutoOptimizer
+public sealed record OptimizerChoice(int FragmentSize, int ChunkSize, int MaxParallel);
+
+public sealed class AutoOptimizer
 {
     readonly Func<StatsSnapshot> _getSnap;
-    readonly Action<int, int> _apply;       // (chunkSize, parallel)
+    readonly Action<OptimizerChoice> _apply;
+    readonly Dictionary<string, OptimizerChoice> _bestByNetwork = new();
     CancellationTokenSource? _cts;
 
-    public AutoOptimizer(Func<StatsSnapshot> getSnap, Action<int, int> apply)
+    static readonly OptimizerChoice[] Candidates =
+    {
+        new(8 * 1024, 32 * 1024, 1),
+        new(16 * 1024, 96 * 1024, 3),
+        new(16 * 1024, 128 * 1024, 4),
+        new(32 * 1024, 192 * 1024, 6),
+        new(32 * 1024, 256 * 1024, 8),
+    };
+
+    public AutoOptimizer(Func<StatsSnapshot> getSnap, Action<OptimizerChoice> apply)
     {
         _getSnap = getSnap;
         _apply = apply;
@@ -32,31 +42,36 @@ public class AutoOptimizer
         {
             try
             {
-                // Wait 5s for the connection to warm up.
-                await Task.Delay(5000, ct);
+                var networkKey = CurrentNetworkKey();
+                if (_bestByNetwork.TryGetValue(networkKey, out var cached))
+                    _apply(cached);
 
-                var s1 = _getSnap();
-                await Task.Delay(10000, ct);   // 10s sampling window
-                var s2 = _getSnap();
+                await Task.Delay(TimeSpan.FromSeconds(4), ct);
 
-                if (ct.IsCancellationRequested) return;
+                var results = new List<(OptimizerChoice Choice, double Score)>();
+                foreach (var candidate in Candidates)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    _apply(candidate);
+                    await Task.Delay(TimeSpan.FromSeconds(12), ct);
 
-                long deltaDown = s2.BytesDown - s1.BytesDown;
-                double mbps = deltaDown / 10.0 / (1024.0 * 1024.0);
+                    var s = _getSnap();
+                    var score =
+                        (s.SpeedDown / 1024.0 / 1024.0 * 35.0) +
+                        (Math.Clamp(s.SuccessRate, 0, 1) * 50.0) -
+                        (Math.Min(s.LatencyMs, 3000) / 100.0);
+                    results.Add((candidate, score));
+                }
 
-                // Pick chunk_size and parallel based on observed throughput.
-                int chunk;
-                int parallel;
-                if (mbps < 0.25)        { chunk =  64 * 1024; parallel = 2; }   // very slow link
-                else if (mbps < 1.0)    { chunk =  96 * 1024; parallel = 3; }
-                else if (mbps < 4.0)    { chunk = 128 * 1024; parallel = 4; }   // balanced default
-                else if (mbps < 12.0)   { chunk = 192 * 1024; parallel = 6; }
-                else                    { chunk = 256 * 1024; parallel = 8; }
-
-                _apply(chunk, parallel);
+                var best = results
+                    .OrderByDescending(r => r.Score)
+                    .ThenBy(r => r.Choice.MaxParallel)
+                    .First().Choice;
+                _bestByNetwork[networkKey] = best;
+                _apply(best);
             }
             catch (OperationCanceledException) { }
-            catch { /* swallow — auto-tune is best-effort */ }
+            catch { }
         }, ct);
     }
 
@@ -64,5 +79,19 @@ public class AutoOptimizer
     {
         try { _cts?.Cancel(); } catch { }
         _cts = null;
+    }
+
+    static string CurrentNetworkKey()
+    {
+        try
+        {
+            var active = NetworkInterface.GetAllNetworkInterfaces()
+                .Where(n => n.OperationalStatus == OperationalStatus.Up)
+                .Where(n => n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                .OrderByDescending(n => n.Speed)
+                .FirstOrDefault();
+            return active == null ? "default" : $"{active.NetworkInterfaceType}:{active.Name}";
+        }
+        catch { return "default"; }
     }
 }

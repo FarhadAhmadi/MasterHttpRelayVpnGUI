@@ -98,16 +98,23 @@ def _patch_relay_health():
 
     @functools.wraps(orig)
     async def wrapped(self, method, url, headers, body):
-        sid = getattr(self, "script_id", "") or ""
+        started = time.perf_counter()
+        sid = ""
         try:
             resp = await orig(self, method, url, headers, body)
+            sid = multi_id.current_request_id() or getattr(self, "script_id", "") or ""
+            latency_ms = (time.perf_counter() - started) * 1000.0
             ok = bool(resp) and resp[:12].startswith(b"HTTP/1.1 2")
             if not ok and resp[:12].startswith(b"HTTP/1.1 3"):
                 ok = True  # 3xx is fine, treat as success
             health.record(ok)
-            (multi_id.report_ok if ok else multi_id.report_err)(sid)
+            if ok:
+                multi_id.report_ok(sid, latency_ms)
+            else:
+                multi_id.report_err(sid)
             return resp
         except Exception as e:
+            sid = multi_id.current_request_id() or getattr(self, "script_id", "") or ""
             health.record(False)
             multi_id.report_err(sid, str(e))
             raise

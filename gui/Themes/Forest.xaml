@@ -2,10 +2,10 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!-- Greenish modern theme. Dark green base + neon-mint accent. Used over the leafy background image. -->
-    <Color x:Key="Bg">#FF0F1F18</Color>
-    <Color x:Key="Surface">#CC102A1F</Color>          <!-- semi-transparent so background shows through -->
-    <Color x:Key="Surface2">#CC1A3A2A</Color>
-    <Color x:Key="Border">#FF2C5240</Color>
+    <Color x:Key="Bg">#FF07100C</Color>
+    <Color x:Key="Surface">#FF101A16</Color>
+    <Color x:Key="Surface2">#FF16241E</Color>
+    <Color x:Key="Border">#FF263C32</Color>
     <Color x:Key="Fg">#FFEAF6EE</Color>
     <Color x:Key="FgDim">#FF9FBDA8</Color>
     <Color x:Key="Accent">#FF2BD9A0</Color>            <!-- neon mint -->
@@ -44,17 +44,35 @@
         <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
     </Style>
 
-    <Style x:Key="Card" TargetType="Border">
+    <Style x:Key="Panel" TargetType="Border">
         <Setter Property="Background" Value="{StaticResource SurfaceBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush2}"/>
         <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="CornerRadius" Value="14"/>
+        <Setter Property="CornerRadius" Value="8"/>
         <Setter Property="Padding" Value="20"/>
-        <Setter Property="Effect">
-            <Setter.Value>
-                <DropShadowEffect Color="#FF000000" Opacity="0.45" BlurRadius="22" ShadowDepth="3"/>
-            </Setter.Value>
-        </Setter>
+    </Style>
+
+    <Style x:Key="Card" TargetType="Border" BasedOn="{StaticResource Panel}"/>
+
+    <Style x:Key="MetricTile" TargetType="Border" BasedOn="{StaticResource Panel}">
+        <Setter Property="Padding" Value="14"/>
+        <Setter Property="Background" Value="{StaticResource Surface2Brush}"/>
+    </Style>
+
+    <Style x:Key="StatusPill" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource Surface2Brush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush2}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius" Value="8"/>
+        <Setter Property="Padding" Value="12,7"/>
+    </Style>
+
+    <Style x:Key="LogBadge" TargetType="Border">
+        <Setter Property="Background" Value="#FF1C3128"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush2}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius" Value="6"/>
+        <Setter Property="Padding" Value="5,2"/>
     </Style>
 
     <Style x:Key="Caption" TargetType="TextBlock">
@@ -64,13 +82,13 @@
 
     <Style x:Key="StatBig" TargetType="TextBlock">
         <Setter Property="Foreground" Value="{StaticResource FgBrush}"/>
-        <Setter Property="FontSize" Value="30"/>
+        <Setter Property="FontSize" Value="28"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
     </Style>
 
     <Style x:Key="StatMed" TargetType="TextBlock">
         <Setter Property="Foreground" Value="{StaticResource FgBrush}"/>
-        <Setter Property="FontSize" Value="20"/>
+        <Setter Property="FontSize" Value="19"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
     </Style>
 
@@ -81,29 +99,22 @@
         <Setter Property="FontSize" Value="22"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
         <Setter Property="Cursor" Value="Hand"/>
-        <Setter Property="Width" Value="170"/>
-        <Setter Property="Height" Value="170"/>
+        <Setter Property="Width" Value="176"/>
+        <Setter Property="Height" Value="176"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
                     <Grid>
-                        <!-- soft outer glow ring -->
-                        <Ellipse Width="190" Height="190" Fill="Transparent">
-                            <Ellipse.Effect>
-                                <DropShadowEffect Color="#FF2BD9A0" BlurRadius="32"
-                                                  ShadowDepth="0" Opacity="0.45"/>
-                            </Ellipse.Effect>
-                        </Ellipse>
-                        <Ellipse x:Name="ring" Stroke="#55FFFFFF" StrokeThickness="2"
-                                 Width="178" Height="178"/>
+                        <Ellipse x:Name="ring" Stroke="#552BD9A0" StrokeThickness="2"
+                                 Width="176" Height="176"/>
                         <Border x:Name="b" Background="{TemplateBinding Background}"
-                                CornerRadius="85" Width="170" Height="170">
+                                CornerRadius="88" Width="164" Height="164">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                     </Grid>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="ring" Property="Stroke" Value="#AAFFFFFF"/>
+                            <Setter TargetName="ring" Property="Stroke" Value="{StaticResource AccentBrush}"/>
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
                             <Setter TargetName="b" Property="Opacity" Value="0.85"/>
@@ -168,6 +179,11 @@
         <Setter Property="Foreground" Value="#FF062118"/>
         <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+
+    <Style x:Key="PresetButton" TargetType="Button" BasedOn="{StaticResource GhostButton}">
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Background" Value="{StaticResource Surface2Brush}"/>
     </Style>
 
     <Style TargetType="TextBox">

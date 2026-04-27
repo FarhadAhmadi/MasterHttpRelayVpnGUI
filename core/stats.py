@@ -13,6 +13,7 @@ _started = time.time()
 _last_t = time.time()
 _last_up = 0
 _last_down = 0
+_last_requests = 0
 
 
 def add_up(n):
@@ -48,7 +49,7 @@ def conn_closed():
 
 
 def snapshot():
-    global _last_t, _last_up, _last_down
+    global _last_t, _last_up, _last_down, _last_requests
     now = time.time()
     with _lock:
         up, down = _bytes_up, _bytes_down
@@ -57,16 +58,24 @@ def snapshot():
     dt = max(now - _last_t, 0.001)
     sup = (up - _last_up) / dt
     sdown = (down - _last_down) / dt
-    _last_t, _last_up, _last_down = now, up, down
+    rps = (reqs - _last_requests) / dt
+    _last_t, _last_up, _last_down, _last_requests = now, up, down, reqs
 
     # Surface health + endpoint count to the GUI.
     try:
         import health as _health
         import multi_id as _multi
         h = _health.state()
-        eps = _multi.endpoint_count()
+        ep = _multi.snapshot()
     except Exception:
-        h, eps = "good", 0
+        h = "good"
+        ep = {
+            "endpoints": 0,
+            "endpoints_healthy": 0,
+            "latency_ms": 0.0,
+            "success_rate": 1.0,
+            "active_endpoint": "",
+        }
 
     return {
         "uptime": int(now - _started),
@@ -75,5 +84,6 @@ def snapshot():
         "requests": reqs,
         "connections": co, "peak_connections": peak,
         "health": h,
-        "endpoints": eps,
+        "requests_per_sec": rps,
+        **ep,
     }

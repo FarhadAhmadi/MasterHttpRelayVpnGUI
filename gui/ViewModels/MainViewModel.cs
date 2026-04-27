@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Data;
@@ -17,7 +18,9 @@ public class MainViewModel : ObservableBase
     readonly ConfigService _cfgSvc = new();
     readonly CoreProcessHost _core = new();
     readonly FirstRunService _firstRun = new();
+    readonly HealthMonitorService _healthMonitor = new();
     readonly AutoOptimizer _autoTuner;
+    readonly Timer _clockTimer;
 
     const int MaxLogLines = 500;
     public ObservableCollection<LogEntry> Logs { get; } = new();
@@ -32,12 +35,14 @@ public class MainViewModel : ObservableBase
 
         _autoTuner = new AutoOptimizer(
             getSnap: () => _last,
-            apply: (chunk, parallel) =>
+            apply: choice =>
             {
-                ChunkSize = chunk;
-                MaxParallel = parallel;
+                FragmentSize = choice.FragmentSize;
+                ChunkSize = choice.ChunkSize;
+                MaxParallel = choice.MaxParallel;
                 _cfgSvc.Save(_cfg);
-                AddLog(LogLevel.Info, "auto", $"tuned: chunk={chunk}, parallel={parallel}");
+                AddLog(LogLevel.Info, "auto",
+                    $"tuned: fragment={choice.FragmentSize}, chunk={choice.ChunkSize}, parallel={choice.MaxParallel}");
             });
 
         _core.LogReceived += e => OnUi(() => AddLog(e));
@@ -67,6 +72,13 @@ public class MainViewModel : ObservableBase
         SysProxyOn = ProxyToggleService.IsEnabled();
         Raise(nameof(SysProxyOn));
         RefreshCertStatus();
+
+        _healthMonitor.Checked += r => OnUi(() => OnHealthChecked(r));
+        _healthMonitor.Start(
+            shouldCheck: () => _core.IsRunning,
+            endpoint: () => (ListenHost, ListenPort));
+        _clockTimer = new Timer(_ => OnUi(() => Raise(nameof(LastCheckLabel))),
+            null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
     }
 
     public async Task BootAsync()
@@ -184,14 +196,25 @@ public class MainViewModel : ObservableBase
     public long   Requests    => _last.Requests;
     public int    Connections => _last.Connections;
     public string Uptime    => Human.Duration(_last.Uptime);
+    public string LatencyLabel => _last.LatencyMs > 0
+        ? $"{_last.LatencyMs:0} ms"
+        : (_probeLatencyMs > 0 ? $"{_probeLatencyMs:0} ms" : "--");
+    public string SuccessRateLabel => $"{Math.Clamp(_last.SuccessRate, 0, 1) * 100:0}%";
+    public string RequestsPerSecLabel => $"{_last.RequestsPerSec:0.0}/s";
+    public string EndpointLabel => _last.Endpoints > 0
+        ? $"{_last.EndpointsHealthy}/{_last.Endpoints}"
+        : "--";
+    public string ActiveEndpointLabel => string.IsNullOrWhiteSpace(_last.ActiveEndpoint)
+        ? "--"
+        : _last.ActiveEndpoint;
 
-    // Health pill — comes straight from the backend snapshot.
+    // Health pill comes straight from the backend snapshot.
     public string Health      => _last.Health ?? "good";
     public string HealthLabel => Health switch
     {
-        "good"     => "✅ " + Loc["health_good"],
-        "unstable" => "⚠ "  + Loc["health_unstable"],
-        "down"     => "✖ "  + Loc["health_down"],
+        "good"     => Loc["health_good"],
+        "unstable" => Loc["health_unstable"],
+        "down"     => Loc["health_down"],
         _          => Loc["health_good"],
     };
     public Brush HealthBrush => Health switch
@@ -202,6 +225,24 @@ public class MainViewModel : ObservableBase
         _          => (Brush)Application.Current.Resources["FgDimBrush"],
     };
 
+    DateTime? _lastCheckAt;
+    double _probeLatencyMs;
+    string _diagnostics = "";
+    public string LastCheckLabel
+    {
+        get
+        {
+            if (_lastCheckAt is null) return Loc["not_checked"];
+            var age = DateTime.Now - _lastCheckAt.Value;
+            if (age.TotalSeconds < 2) return Loc["checked_now"];
+            if (age.TotalSeconds < 60) return string.Format(Loc["checked_seconds"], (int)age.TotalSeconds);
+            return string.Format(Loc["checked_minutes"], (int)age.TotalMinutes);
+        }
+    }
+    public string Diagnostics => string.IsNullOrWhiteSpace(_diagnostics)
+        ? Loc["diagnostics_idle"]
+        : _diagnostics;
+
     void OnStats(StatsSnapshot s)
     {
         _last = s;
@@ -210,7 +251,22 @@ public class MainViewModel : ObservableBase
             nameof(SpeedDown), nameof(SpeedUp), nameof(TotalDown), nameof(TotalUp),
             nameof(Requests), nameof(Connections), nameof(Uptime),
             nameof(Health), nameof(HealthLabel), nameof(HealthBrush),
+            nameof(LatencyLabel), nameof(SuccessRateLabel), nameof(RequestsPerSecLabel),
+            nameof(EndpointLabel), nameof(ActiveEndpointLabel),
         }) Raise(n);
+    }
+
+    void OnHealthChecked(HealthCheckResult result)
+    {
+        _lastCheckAt = result.CheckedAt;
+        _probeLatencyMs = result.Reachable ? result.LatencyMs : 0;
+        _diagnostics = result.Reachable
+            ? $"{Loc["diag_proxy_reachable"]} ({result.LatencyMs:0} ms)"
+            : $"{Loc["diag_proxy_unreachable"]}: {result.Message}";
+
+        Raise(nameof(LastCheckLabel));
+        Raise(nameof(LatencyLabel));
+        Raise(nameof(Diagnostics));
     }
 
     LogLevel _minLevel = LogLevel.Info;
@@ -287,9 +343,11 @@ public class MainViewModel : ObservableBase
         Raise(nameof(StatusFriendly));
         Raise(nameof(HeroLabel));
         Raise(nameof(HealthLabel));
+        Raise(nameof(LastCheckLabel));
+        Raise(nameof(Diagnostics));
     }
 
-    // ── Deployment IDs ─────────────────────────────────────────
+    // Deployment IDs
     void SyncDeploymentList()
     {
         DeploymentIds.Clear();
@@ -334,7 +392,7 @@ public class MainViewModel : ObservableBase
         _cfg.ScriptId = ids.Count > 0 ? ids[0] : _cfg.ScriptId;
     }
 
-    // ── Presets ────────────────────────────────────────────────
+    // Presets
     void ApplyPreset(string? key)
     {
         if (string.IsNullOrEmpty(key)) return;
@@ -549,6 +607,8 @@ public class MainViewModel : ObservableBase
     public void Shutdown()
     {
         _autoTuner.Stop();
+        _healthMonitor.Stop();
+        try { _clockTimer.Dispose(); } catch { }
         try { _core.StopAsync(TimeSpan.FromSeconds(2)).Wait(); } catch { }
         _core.Dispose();
     }
