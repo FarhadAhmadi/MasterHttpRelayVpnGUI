@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
@@ -8,6 +10,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Data;
 using System.Windows.Media;
+using System.Windows.Threading;
 using MasterRelayVPN.Models;
 using MasterRelayVPN.Services;
 
@@ -21,9 +24,18 @@ public class MainViewModel : ObservableBase
     readonly HealthMonitorService _healthMonitor = new();
     readonly AutoOptimizer _autoTuner;
     readonly Timer _clockTimer;
+    readonly DispatcherTimer _logFlushTimer;
+    readonly ConcurrentQueue<LogEntry> _pendingLogs = new();
+    readonly Queue<double> _latencyTrend = new();
+    readonly Queue<double> _throughputTrend = new();
+    bool _deploymentHandlersAttached;
+    ProxyToggleService.ProxyState? _previousProxyState;
+    bool _proxyManagedByApp;
+    int _shutdownStarted;
 
     const int MaxLogLines = 500;
     public ObservableCollection<LogEntry> Logs { get; } = new();
+    public ObservableCollection<RelayEndpointDetail> RelayDetails { get; } = new();
     public ObservableCollection<DeploymentEntry> DeploymentIds { get; } = new();
     public ICollectionView LogsView { get; }
     public MasterRelayVPN.Services.Localization Loc => MasterRelayVPN.Services.Localization.Instance;
@@ -45,7 +57,7 @@ public class MainViewModel : ObservableBase
                     $"tuned: fragment={choice.FragmentSize}, chunk={choice.ChunkSize}, parallel={choice.MaxParallel}");
             });
 
-        _core.LogReceived += e => OnUi(() => AddLog(e));
+        _core.LogReceived += QueueLog;
         _core.StatsReceived += s => OnUi(() => OnStats(s));
         _core.StatusChanged += s => OnUi(() => Status = s);
         _core.ProcessExited += code => OnUi(() => OnExited(code));
@@ -60,6 +72,7 @@ public class MainViewModel : ObservableBase
         ClearLogsCmd    = new RelayCommand(() => Logs.Clear());
         CopyLogsCmd     = new RelayCommand(CopyLogs);
         ExportLogsCmd   = new RelayCommand(ExportLogs);
+        ExportRelayStatusCmd = new RelayCommand(ExportRelayStatus);
         ToggleLanguageCmd = new RelayCommand(ToggleLanguage);
 
         AddDeploymentCmd    = new RelayCommand(AddDeployment);
@@ -79,6 +92,12 @@ public class MainViewModel : ObservableBase
             endpoint: () => (ListenHost, ListenPort));
         _clockTimer = new Timer(_ => OnUi(() => Raise(nameof(LastCheckLabel))),
             null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        _logFlushTimer = new DispatcherTimer(
+            TimeSpan.FromMilliseconds(100),
+            DispatcherPriority.Background,
+            (_, __) => FlushPendingLogs(),
+            Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher);
+        _logFlushTimer.Start();
     }
 
     public async Task BootAsync()
@@ -119,6 +138,8 @@ public class MainViewModel : ObservableBase
             nameof(ListenHost), nameof(ListenPort), nameof(LogLevelText), nameof(VerifySsl),
             nameof(EnableHttp2), nameof(EnableChunked), nameof(ChunkSize),
             nameof(MaxParallel), nameof(FragmentSize), nameof(ActivePreset),
+            nameof(MultiIdFailThreshold), nameof(MultiIdCooldownSeconds),
+            nameof(MultiIdStrategy), nameof(MultiIdMaxConsecutive),
         }) Raise(n);
     }
 
@@ -140,6 +161,26 @@ public class MainViewModel : ObservableBase
     public int    MaxParallel   { get => _cfg.MaxParallel;    set { _cfg.MaxParallel = value; Raise(); } }
     public int    FragmentSize  { get => _cfg.FragmentSize;   set { _cfg.FragmentSize = value; Raise(); } }
     public string ActivePreset  { get => _cfg.Preset; set { _cfg.Preset = value; Raise(); } }
+    public int    MultiIdFailThreshold
+    {
+        get => _cfg.MultiIdFailThreshold;
+        set { _cfg.MultiIdFailThreshold = value; Raise(); }
+    }
+    public int    MultiIdCooldownSeconds
+    {
+        get => _cfg.MultiIdCooldownSeconds;
+        set { _cfg.MultiIdCooldownSeconds = value; Raise(); }
+    }
+    public string MultiIdStrategy
+    {
+        get => _cfg.MultiIdStrategy;
+        set { _cfg.MultiIdStrategy = value; Raise(); }
+    }
+    public int    MultiIdMaxConsecutive
+    {
+        get => _cfg.MultiIdMaxConsecutive;
+        set { _cfg.MultiIdMaxConsecutive = value; Raise(); }
+    }
 
     string _status = "Stopped";
     public string Status
@@ -200,13 +241,41 @@ public class MainViewModel : ObservableBase
         ? $"{_last.LatencyMs:0} ms"
         : (_probeLatencyMs > 0 ? $"{_probeLatencyMs:0} ms" : "--");
     public string SuccessRateLabel => $"{Math.Clamp(_last.SuccessRate, 0, 1) * 100:0}%";
+    public string WindowSuccessRateLabel => $"{Math.Clamp(_last.WindowSuccessRate, 0, 1) * 100:0}%";
     public string RequestsPerSecLabel => $"{_last.RequestsPerSec:0.0}/s";
+    public string WindowErrorsLabel => _last.WindowErrors.ToString();
+    public string WindowRequestsLabel => _last.WindowRequests.ToString();
+    public string PeakConnectionsLabel => _last.PeakConnections.ToString();
+    public string TotalTrafficLabel => Human.Bytes(_last.BytesUp + _last.BytesDown);
+    public string CacheHitRateLabel => $"{Math.Clamp(_last.CacheHitRate, 0, 1) * 100:0}%";
+    public string CacheSizeLabel => Human.Bytes(_last.CacheBytes);
     public string EndpointLabel => _last.Endpoints > 0
         ? $"{_last.EndpointsHealthy}/{_last.Endpoints}"
         : "--";
     public string ActiveEndpointLabel => string.IsNullOrWhiteSpace(_last.ActiveEndpoint)
         ? "--"
         : _last.ActiveEndpoint;
+    public string RelayRoutingLabel => $"{MultiIdStrategy} (max streak: {MultiIdMaxConsecutive})";
+    public string ConfiguredRelaysCountLabel
+        => (_cfg.ScriptIds?.Count ?? 0) > 0 ? (_cfg.ScriptIds?.Count ?? 0).ToString() : "0";
+    public string ConfiguredRelaysPreview
+    {
+        get
+        {
+            var ids = _cfg.ScriptIds ?? new System.Collections.Generic.List<string>();
+            if (ids.Count == 0 && !string.IsNullOrWhiteSpace(_cfg.ScriptId))
+                ids = new System.Collections.Generic.List<string> { _cfg.ScriptId };
+            if (ids.Count == 0) return "No relay IDs configured";
+            return string.Join(Environment.NewLine, ids.Select(ShortRelayId));
+        }
+    }
+    public string AppVersionLabel
+        => System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown";
+    public string CorePathLabel => Paths.CoreExe;
+    public string ConfigPathLabel => Paths.ConfigFile;
+    public string DataPathLabel => Paths.DataDir;
+    public string ThroughputTrendLabel => BuildSparkline(_throughputTrend, scaleMax: 1024 * 1024);
+    public string LatencyTrendLabel => BuildSparkline(_latencyTrend, scaleMax: 1500);
 
     // Health pill comes straight from the backend snapshot.
     public string Health      => _last.Health ?? "good";
@@ -246,13 +315,25 @@ public class MainViewModel : ObservableBase
     void OnStats(StatsSnapshot s)
     {
         _last = s;
+        UpdateTrends(s);
+        RelayDetails.Clear();
+        if (s.EndpointsDetail != null)
+        {
+            foreach (var ep in s.EndpointsDetail.OrderByDescending(x => x.SuccessRate).ThenBy(x => x.LatencyMs))
+                RelayDetails.Add(ep);
+        }
         foreach (var n in new[]
         {
             nameof(SpeedDown), nameof(SpeedUp), nameof(TotalDown), nameof(TotalUp),
             nameof(Requests), nameof(Connections), nameof(Uptime),
             nameof(Health), nameof(HealthLabel), nameof(HealthBrush),
             nameof(LatencyLabel), nameof(SuccessRateLabel), nameof(RequestsPerSecLabel),
+            nameof(WindowSuccessRateLabel), nameof(WindowErrorsLabel), nameof(WindowRequestsLabel),
+            nameof(PeakConnectionsLabel), nameof(TotalTrafficLabel),
+            nameof(CacheHitRateLabel), nameof(CacheSizeLabel),
             nameof(EndpointLabel), nameof(ActiveEndpointLabel),
+            nameof(RelayRoutingLabel), nameof(ConfiguredRelaysCountLabel),
+            nameof(ThroughputTrendLabel), nameof(LatencyTrendLabel),
         }) Raise(n);
     }
 
@@ -329,6 +410,7 @@ public class MainViewModel : ObservableBase
     public RelayCommand ClearLogsCmd { get; }
     public RelayCommand CopyLogsCmd { get; }
     public RelayCommand ExportLogsCmd { get; }
+    public RelayCommand ExportRelayStatusCmd { get; }
     public RelayCommand ToggleLanguageCmd { get; }
     public RelayCommand AddDeploymentCmd { get; }
     public RelayCommand RemoveDeploymentCmd { get; }
@@ -360,8 +442,14 @@ public class MainViewModel : ObservableBase
         if (DeploymentIds.Count == 0)
             DeploymentIds.Add(new DeploymentEntry { Value = "" });
 
+        if (!_deploymentHandlersAttached)
+        {
+            DeploymentIds.CollectionChanged += (_, __) => PersistDeployments();
+            _deploymentHandlersAttached = true;
+        }
         foreach (var d in DeploymentIds) d.PropertyChanged += (_, __) => PersistDeployments();
-        DeploymentIds.CollectionChanged += (_, __) => PersistDeployments();
+        Raise(nameof(ConfiguredRelaysCountLabel));
+        Raise(nameof(ConfiguredRelaysPreview));
     }
 
     void AddDeployment()
@@ -389,7 +477,10 @@ public class MainViewModel : ObservableBase
 
         _cfg.ScriptIds = ids;
         // Keep `script_id` in sync for back-compat: first non-empty entry.
-        _cfg.ScriptId = ids.Count > 0 ? ids[0] : _cfg.ScriptId;
+        _cfg.ScriptId = ids.Count > 0 ? ids[0] : "";
+        SaveConfigSafe();
+        Raise(nameof(ConfiguredRelaysCountLabel));
+        Raise(nameof(ConfiguredRelaysPreview));
     }
 
     // Presets
@@ -430,7 +521,13 @@ public class MainViewModel : ObservableBase
 
             if (!_sysProxyOn)
             {
-                try { ProxyToggleService.Enable(_cfg.ListenHost, _cfg.ListenPort); SysProxyOn = true; }
+                try
+                {
+                    _previousProxyState ??= ProxyToggleService.Capture();
+                    ProxyToggleService.Enable(_cfg.ListenHost, _cfg.ListenPort);
+                    _proxyManagedByApp = true;
+                    SysProxyOn = true;
+                }
                 catch (Exception ex) { AddLog(LogLevel.Warning, "sysproxy", ex.Message); }
             }
 
@@ -455,10 +552,7 @@ public class MainViewModel : ObservableBase
         try
         {
             await _core.StopAsync(TimeSpan.FromSeconds(4));
-            if (_sysProxyOn)
-            {
-                try { ProxyToggleService.Disable(); SysProxyOn = false; } catch { }
-            }
+            RestorePreviousProxySettings();
         }
         catch (Exception ex) { AddLog(LogLevel.Error, "host", "Stop failed: " + ex.Message); }
         RefreshCommands();
@@ -474,11 +568,7 @@ public class MainViewModel : ObservableBase
                 ? ErrorMessages.Friendly(lastErr.Message)
                 : "Connection failed. Try a different SNI or check Settings.";
         }
-        if (_sysProxyOn)
-        {
-            try { ProxyToggleService.Disable(); } catch { }
-            SysProxyOn = false;
-        }
+        RestorePreviousProxySettings();
         RefreshCommands();
     }
 
@@ -488,7 +578,7 @@ public class MainViewModel : ObservableBase
         {
             ClampNetworkKnobs();
             PersistDeployments();
-            _cfgSvc.Save(_cfg);
+            SaveConfigSafe();
             AddLog(LogLevel.Info, "config", "Settings saved.");
         }
         catch (Exception ex) { AddLog(LogLevel.Error, "config", ex.Message); }
@@ -502,6 +592,15 @@ public class MainViewModel : ObservableBase
         if (ChunkSize < 16384)    ChunkSize = 16384;
         if (MaxParallel < 1)      MaxParallel = 1;
         if (MaxParallel > 16)     MaxParallel = 16;
+        if (MultiIdFailThreshold < 1) MultiIdFailThreshold = 1;
+        if (MultiIdFailThreshold > 20) MultiIdFailThreshold = 20;
+        if (MultiIdCooldownSeconds < 5) MultiIdCooldownSeconds = 5;
+        if (MultiIdCooldownSeconds > 600) MultiIdCooldownSeconds = 600;
+        if (MultiIdMaxConsecutive < 1) MultiIdMaxConsecutive = 1;
+        if (MultiIdMaxConsecutive > 20) MultiIdMaxConsecutive = 20;
+        if (string.IsNullOrWhiteSpace(MultiIdStrategy))
+            MultiIdStrategy = "balanced";
+        Raise(nameof(RelayRoutingLabel));
     }
 
     async Task InstallCertAsync()
@@ -547,11 +646,18 @@ public class MainViewModel : ObservableBase
         try
         {
             if (_sysProxyOn)
-            { ProxyToggleService.Disable(); AddLog(LogLevel.Info, "sysproxy", "Windows proxy disabled"); }
+            {
+                RestorePreviousProxySettings();
+                AddLog(LogLevel.Info, "sysproxy", "Windows proxy restored");
+            }
             else
-            { ProxyToggleService.Enable(ListenHost, ListenPort);
-              AddLog(LogLevel.Info, "sysproxy", $"Windows proxy -> {ListenHost}:{ListenPort}"); }
-            SysProxyOn = !_sysProxyOn;
+            {
+                _previousProxyState ??= ProxyToggleService.Capture();
+                ProxyToggleService.Enable(ListenHost, ListenPort);
+                _proxyManagedByApp = true;
+                SysProxyOn = true;
+                AddLog(LogLevel.Info, "sysproxy", $"Windows proxy -> {ListenHost}:{ListenPort}");
+            }
         }
         catch (Exception ex) { AddLog(LogLevel.Error, "sysproxy", ex.Message); }
     }
@@ -581,8 +687,69 @@ public class MainViewModel : ObservableBase
         catch (Exception ex) { AddLog(LogLevel.Error, "logs", ex.Message); }
     }
 
+    void ExportRelayStatus()
+    {
+        try
+        {
+            var dlg = new Microsoft.Win32.SaveFileDialog
+            {
+                Filter = "JSON file (*.json)|*.json|Text file (*.txt)|*.txt|All files (*.*)|*.*",
+                FileName = $"relay-status-{DateTime.Now:yyyyMMdd-HHmmss}.json",
+            };
+            if (dlg.ShowDialog() != true) return;
+
+            var rows = RelayDetails.Select(r => new
+            {
+                id = r.Id,
+                ok = r.Ok,
+                err = r.Err,
+                latency_ms = Math.Round(r.LatencyMs, 2),
+                uses = r.Uses,
+                recent_failures = r.RecentFailures,
+                parked = r.Parked,
+                parked_for_s = r.ParkedForS,
+                success_rate = Math.Round(r.SuccessRate, 4),
+            }).ToList();
+
+            var payload = new
+            {
+                generated_at = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                strategy = MultiIdStrategy,
+                max_consecutive = MultiIdMaxConsecutive,
+                total_configured_relays = ConfiguredRelaysCountLabel,
+                endpoint_health = EndpointLabel,
+                active_endpoint = ActiveEndpointLabel,
+                relays = rows,
+            };
+
+            var json = System.Text.Json.JsonSerializer.Serialize(payload, new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = true
+            });
+            File.WriteAllText(dlg.FileName, json);
+            AddLog(LogLevel.Info, "relay", $"Relay status exported: {dlg.FileName}");
+        }
+        catch (Exception ex)
+        {
+            AddLog(LogLevel.Error, "relay", "Export relay status failed: " + ex.Message);
+        }
+    }
+
     void AddLog(LogLevel lvl, string src, string msg)
         => AddLog(new LogEntry(DateTime.Now, lvl, src, msg));
+
+    void QueueLog(LogEntry e) => _pendingLogs.Enqueue(e);
+
+    void FlushPendingLogs()
+    {
+        var drained = 0;
+        while (drained < 200 && _pendingLogs.TryDequeue(out var e))
+        {
+            AddLog(e);
+            drained++;
+        }
+    }
+
     void AddLog(LogEntry e)
     {
         Logs.Add(e);
@@ -604,13 +771,84 @@ public class MainViewModel : ObservableBase
         app.Dispatcher.BeginInvoke(a);
     }
 
-    public void Shutdown()
+    public async Task ShutdownAsync()
     {
+        if (Interlocked.Exchange(ref _shutdownStarted, 1) == 1) return;
         _autoTuner.Stop();
         _healthMonitor.Stop();
         try { _clockTimer.Dispose(); } catch { }
-        try { _core.StopAsync(TimeSpan.FromSeconds(2)).Wait(); } catch { }
+        try { _logFlushTimer.Stop(); } catch { }
+        OnUi(FlushPendingLogs);
+        try
+        {
+            ClampNetworkKnobs();
+            PersistDeployments();
+            SaveConfigSafe();
+        }
+        catch { }
+        RestorePreviousProxySettings();
+        try { await _core.StopAsync(TimeSpan.FromSeconds(2)); } catch { }
         _core.Dispose();
+    }
+
+    void SaveConfigSafe()
+    {
+        try { _cfgSvc.Save(_cfg); } catch { }
+    }
+
+    static string ShortRelayId(string sid)
+    {
+        if (string.IsNullOrWhiteSpace(sid)) return "";
+        sid = sid.Trim();
+        return sid.Length <= 16 ? sid : $"{sid[..6]}...{sid[^6..]}";
+    }
+
+    void RestorePreviousProxySettings()
+    {
+        if (!_proxyManagedByApp)
+        {
+            SysProxyOn = ProxyToggleService.IsEnabled();
+            return;
+        }
+        try
+        {
+            if (_previousProxyState != null) ProxyToggleService.Restore(_previousProxyState);
+            else ProxyToggleService.Disable();
+        }
+        catch { }
+        finally
+        {
+            _proxyManagedByApp = false;
+            _previousProxyState = null;
+            SysProxyOn = ProxyToggleService.IsEnabled();
+        }
+    }
+
+    void UpdateTrends(StatsSnapshot s)
+    {
+        PushTrend(_throughputTrend, s.SpeedDown + s.SpeedUp);
+        PushTrend(_latencyTrend, s.LatencyMs > 0 ? s.LatencyMs : _probeLatencyMs);
+    }
+
+    static void PushTrend(Queue<double> q, double v)
+    {
+        q.Enqueue(Math.Max(0, v));
+        while (q.Count > 24) q.Dequeue();
+    }
+
+    static string BuildSparkline(IEnumerable<double> values, double scaleMax)
+    {
+        const string levels = " .:-=+*#%@";
+        var arr = values.ToArray();
+        if (arr.Length == 0) return "(waiting for data)";
+        var max = Math.Max(scaleMax, arr.Max());
+        if (max <= 0) return new string(' ', arr.Length);
+        var chars = arr.Select(v =>
+        {
+            var idx = (int)Math.Round((levels.Length - 1) * Math.Clamp(v / max, 0, 1));
+            return levels[idx];
+        });
+        return new string(chars.ToArray());
     }
 }
 

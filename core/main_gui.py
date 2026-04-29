@@ -19,7 +19,7 @@ from proxy_server import ProxyServer                  # noqa: E402
 
 import gui_bridge  # noqa: E402
 
-__version__ = "1.4.0-gui"
+__version__ = "1.5.0-gui"
 
 
 def load_config(path):

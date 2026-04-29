@@ -51,13 +51,26 @@ class _Endpoint:
 
 
 class MultiIdDispatcher:
-    def __init__(self, ids, fail_threshold=3, cooldown=30.0):
+    def __init__(
+        self,
+        ids,
+        fail_threshold=3,
+        cooldown=30.0,
+        strategy="balanced",
+        max_consecutive=2,
+    ):
         self._lock = threading.Lock()
         self._eps = [_Endpoint(s) for s in ids]
         self._fail_threshold = max(1, int(fail_threshold))
         self._cooldown = max(5.0, float(cooldown))
+        self._strategy = (strategy or "balanced").strip().lower()
+        if self._strategy not in {"balanced", "round_robin", "least_used"}:
+            self._strategy = "balanced"
+        self._max_consecutive = max(1, int(max_consecutive))
         self._active_sid = ""
         self._rr = 0
+        self._last_sid = ""
+        self._consecutive = 0
 
     @property
     def count(self):
@@ -77,15 +90,43 @@ class MultiIdDispatcher:
                 live = [ep]
                 log.warning("all deployment IDs parked; probing %s", _short(ep.sid))
 
-            ranked = sorted(live, key=lambda e: e.score(now), reverse=True)
-            top_score = ranked[0].score(now)
-            eligible = [e for e in ranked if top_score - e.score(now) <= 12.0] or ranked[:1]
-            ep = eligible[self._rr % len(eligible)]
+            ep = self._pick_endpoint(live, now)
             self._rr += 1
             ep.last_used = now
             ep.uses += 1
             self._active_sid = ep.sid
+            if ep.sid == self._last_sid:
+                self._consecutive += 1
+            else:
+                self._last_sid = ep.sid
+                self._consecutive = 1
             return ep.sid
+
+    def _pick_endpoint(self, live, now):
+        if self._strategy == "round_robin":
+            ordered = sorted(live, key=lambda e: e.last_used)
+            return self._apply_consecutive_cap(ordered)
+
+        if self._strategy == "least_used":
+            ordered = sorted(live, key=lambda e: (e.uses, -e.success_rate, e.latency_ms or 0.0))
+            return self._apply_consecutive_cap(ordered)
+
+        ranked = sorted(live, key=lambda e: e.score(now), reverse=True)
+        top_score = ranked[0].score(now)
+        eligible = [e for e in ranked if top_score - e.score(now) <= 12.0] or ranked[:1]
+        return self._apply_consecutive_cap(eligible)
+
+    def _apply_consecutive_cap(self, candidates):
+        if not candidates:
+            return None
+        ep = candidates[self._rr % len(candidates)]
+        if len(candidates) == 1:
+            return ep
+        if self._last_sid and ep.sid == self._last_sid and self._consecutive >= self._max_consecutive:
+            for alt in candidates:
+                if alt.sid != self._last_sid:
+                    return alt
+        return ep
 
     def report_ok(self, sid, latency_ms=None):
         if not sid:
@@ -138,17 +179,33 @@ class MultiIdDispatcher:
                     "latency_ms": 0.0,
                     "success_rate": 1.0,
                     "active_endpoint": "",
+                    "endpoints_detail": [],
                 }
             live = [e for e in self._eps if e.parked_until <= now]
             measured = [e.latency_ms for e in self._eps if e.latency_ms > 0]
             total_ok = sum(e.ok for e in self._eps)
             total = sum(e.total for e in self._eps)
+            details = []
+            for e in self._eps:
+                parked_for = max(0.0, e.parked_until - now)
+                details.append({
+                    "id": _short(e.sid),
+                    "ok": e.ok,
+                    "err": e.err,
+                    "recent_failures": e.recent_failures,
+                    "latency_ms": e.latency_ms,
+                    "parked": parked_for > 0.0,
+                    "parked_for_s": int(parked_for),
+                    "uses": e.uses,
+                    "success_rate": e.success_rate,
+                })
             return {
                 "endpoints": len(self._eps),
                 "endpoints_healthy": len(live),
                 "latency_ms": (sum(measured) / len(measured)) if measured else 0.0,
                 "success_rate": (total_ok / total) if total else 1.0,
                 "active_endpoint": _short(self._active_sid),
+                "endpoints_detail": details,
             }
 
     def _find(self, sid):
@@ -178,6 +235,8 @@ def install(cfg):
         ids,
         fail_threshold=int(cfg.get("multi_id_fail_threshold", 3)),
         cooldown=float(cfg.get("multi_id_cooldown_seconds", 30.0)),
+        strategy=cfg.get("multi_id_strategy", "balanced"),
+        max_consecutive=int(cfg.get("multi_id_max_consecutive", 2)),
     )
 
     import domain_fronter
@@ -196,7 +255,8 @@ def install(cfg):
         return sid if sid else orig_next(self)
 
     DF._next_script_id = next_script_id_wrapped
-    log.info("smart multi-ID routing enabled (%d endpoints)", len(ids))
+    log.info("smart multi-ID routing enabled (%d endpoints, strategy=%s)",
+             len(ids), cfg.get("multi_id_strategy", "balanced"))
 
 
 def report_ok(sid, latency_ms=None):
@@ -224,6 +284,7 @@ def snapshot():
         "latency_ms": 0.0,
         "success_rate": 1.0,
         "active_endpoint": "",
+        "endpoints_detail": [],
     }
 
 

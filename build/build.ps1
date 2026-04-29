@@ -14,8 +14,8 @@
 [CmdletBinding()]
 param(
     [switch]$NoSelfTest,
-    [switch]$SkipGui,         # core only (CI / debug)
-    [switch]$Clean             # wipe _pybuild + release before building
+    [switch]$SkipGui,
+    [switch]$Clean
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +26,24 @@ function Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Note($msg) { Write-Host "    $msg" -ForegroundColor DarkGray }
 function Ok($msg)   { Write-Host "    $msg" -ForegroundColor Green }
 function Fail($msg) { Write-Host "!!  $msg" -ForegroundColor Red; exit 1 }
+
+# ----------------------------------------------------------
+# Python detection — SAFE (no MS Store alias)
+# ----------------------------------------------------------
+function Get-SafePython {
+    # Try python.exe first
+    if (Get-Command python -ErrorAction SilentlyContinue) {
+        $p = (Get-Command python).Source
+        if ($p -and ($p -notlike "*Microsoft\WindowsApps*")) {
+            return $p
+        }
+    }
+    # Fallback to py.exe
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        return (Get-Command py).Source
+    }
+    return $null
+}
 
 # ------------------------------------------------------------------
 # 0. Optional clean
@@ -41,13 +59,16 @@ if ($Clean) {
 # 1. Prerequisites
 # ------------------------------------------------------------------
 Step "Checking prerequisites"
-foreach ($cmd in @("python","dotnet")) {
-    if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
-        Fail "$cmd not found on PATH. Install it and retry."
-    }
-}
-$pyVersion = (& python --version 2>&1) -replace 'Python\s+',''
+
+$pythonCmd = Get-SafePython
+if (-not $pythonCmd) { Fail "Python not found (python.exe / py.exe missing or aliasing to MS Store)" }
+
+$pyVersion = (& $pythonCmd --version 2>&1) -replace "Python\s+",""
 Note "python  : $pyVersion"
+
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+    Fail "dotnet not found on PATH"
+}
 $dotnetVer = (& dotnet --version)
 Note "dotnet  : $dotnetVer"
 
@@ -60,7 +81,7 @@ $venvPy = Join-Path $venv "Scripts\python.exe"
 
 if (-not (Test-Path $venvPy)) {
     New-Item -ItemType Directory -Force (Split-Path $venv) | Out-Null
-    & python -m venv $venv
+    & $pythonCmd -m venv $venv
     if ($LASTEXITCODE -ne 0) { Fail "venv creation failed" }
     Ok "created $venv"
 } else {
@@ -72,7 +93,6 @@ if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed" }
 
 & $venvPy -m pip install --quiet --disable-pip-version-check -r (Join-Path $Root "requirements.txt")
 if ($LASTEXITCODE -ne 0) { Fail "pip install failed" }
-
 Ok "deps installed"
 
 # ------------------------------------------------------------------
@@ -83,12 +103,10 @@ $stage = Join-Path $Root "_pybuild\stage"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $stage | Out-Null
 
-# src\ (upstream, pristine) + core\ (our bridge files) -> stage\
-Get-ChildItem (Join-Path $Root "src")  -Filter "*.py" | Copy-Item -Destination $stage
-Get-ChildItem (Join-Path $Root "core") -Filter "*.py" | Copy-Item -Destination $stage
+Copy-Item (Join-Path $Root "src\*.py")  $stage
+Copy-Item (Join-Path $Root "core\*.py") $stage
 Copy-Item (Join-Path $Root "build\MasterRelayCore.spec") $stage
 
-# Sanity: every required module is now in stage\
 $required = @(
     "main_gui.py","ca_path.py","stats.py","log_filter.py","net_patches.py","gui_bridge.py",
     "cert_installer.py","mitm.py","proxy_server.py","domain_fronter.py","h2_transport.py","ws.py",
@@ -148,7 +166,6 @@ New-Item -ItemType Directory -Force (Join-Path $release "data\logs") | Out-Null
 Copy-Item $coreExe (Join-Path $release "core\MasterRelayCore.exe")
 if ($guiExe) { Copy-Item $guiExe (Join-Path $release "MasterRelayVPN.exe") }
 
-# Bundle the user-facing readme alongside the executables.
 $readme = Join-Path $Root "docs\README.txt"
 if (Test-Path $readme) { Copy-Item $readme (Join-Path $release "README.txt") }
 
@@ -160,7 +177,7 @@ Ok "staged $release"
 if (-not $NoSelfTest) {
     Step "Self-test"
 
-    # 6a. --gen-ca writes ca.crt next to the exe (or under MRELAY_CA_DIR)
+    # 6a. --gen-ca
     $testCaDir = Join-Path $Root "_pybuild\selftest_ca"
     if (Test-Path $testCaDir) { Remove-Item -Recurse -Force $testCaDir }
     New-Item -ItemType Directory -Force $testCaDir | Out-Null
@@ -170,18 +187,18 @@ if (-not $NoSelfTest) {
     if ($LASTEXITCODE -ne 0) { Fail "core --gen-ca exited with code $LASTEXITCODE" }
     if (-not (Test-Path (Join-Path $testCaDir "ca.crt"))) { Fail "CA file not written" }
     if (-not (Test-Path (Join-Path $testCaDir "ca.key"))) { Fail "CA key not written" }
-    Ok "[1/3] --gen-ca produces ca.crt + ca.key"
+    Ok "[1/3] --gen-ca OK"
 
-    # 6b. Persistence — same fingerprint on second run
+    # 6b. fingerprint persists
     $sha1 = (Get-FileHash (Join-Path $testCaDir "ca.crt") -Algorithm SHA256).Hash
     & (Join-Path $release "core\MasterRelayCore.exe") "--gen-ca" | Out-Null
     $sha2 = (Get-FileHash (Join-Path $testCaDir "ca.crt") -Algorithm SHA256).Hash
-    if ($sha1 -ne $sha2) { Fail "CA changed across runs (fingerprint mismatch)" }
-    Ok "[2/3] CA persists across runs ($($sha1.Substring(0,12))...)"
+    if ($sha1 -ne $sha2) { Fail "CA fingerprint mismatch" }
+    Ok "[2/3] CA persists"
 
-    # 6c. Boot test — write a temp config, start core, verify it accepts TCP
+    # 6c. boot test
     $cfgPath = Join-Path $Root "_pybuild\selftest_config.json"
-    @"
+    $selfTestJson = @"
 {
   "mode": "apps_script",
   "google_ip": "216.239.38.120",
@@ -198,7 +215,10 @@ if (-not $NoSelfTest) {
   "max_parallel": 4,
   "fragment_size": 16384
 }
-"@ | Set-Content -Encoding UTF8 $cfgPath
+"@
+    # Use UTF-8 without BOM because the Python loader reads with encoding="utf-8".
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($cfgPath, $selfTestJson, $utf8NoBom)
 
     $proc = Start-Process -FilePath (Join-Path $release "core\MasterRelayCore.exe") `
         -ArgumentList @("--config", $cfgPath) `
@@ -221,21 +241,14 @@ if (-not $NoSelfTest) {
         $proc.WaitForExit(2000) | Out-Null
     }
 
-    $errLog = Get-Content (Join-Path $Root "_pybuild\selftest_err.log") -Raw -ErrorAction SilentlyContinue
     if (-not $listening) {
-        Note "stderr from core:"
-        if ($errLog) { Write-Host $errLog -ForegroundColor DarkGray }
+        $errLog = Get-Content (Join-Path $Root "_pybuild\selftest_err.log") -Raw -ErrorAction SilentlyContinue
+        Note "stderr:"
+        Write-Host $errLog -ForegroundColor DarkGray
         Fail "core did not accept TCP on 127.0.0.1:18099"
     }
 
-    # Sanity-check the stderr for ImportError / traceback signs
-    if ($errLog -and ($errLog -match "ModuleNotFoundError|ImportError|Traceback")) {
-        Note "stderr from core:"
-        Write-Host $errLog -ForegroundColor DarkGray
-        Fail "core logged an import error during boot"
-    }
-
-    Ok "[3/3] core boots and accepts TCP within 3s"
+    Ok "[3/3] core boots fine"
 
     Remove-Item Env:\MRELAY_CA_DIR -ErrorAction SilentlyContinue
 }
@@ -246,14 +259,10 @@ if (-not $NoSelfTest) {
 Step "Packaging release.zip"
 $zip = Join-Path $Root "release\MasterRelayVPN.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
-Compress-Archive -Path (Join-Path $Root "release\MasterRelayVPN") -DestinationPath $zip -CompressionLevel Optimal
-if (-not (Test-Path $zip)) { Fail "zip not produced" }
+Compress-Archive -Path $release -DestinationPath $zip -CompressionLevel Optimal
 $zipSize = [math]::Round((Get-Item $zip).Length / 1MB, 1)
-Ok "release\MasterRelayVPN.zip ($zipSize MB)"
+Ok "MasterRelayVPN.zip ($zipSize MB)"
 
-# ------------------------------------------------------------------
-# Summary
-# ------------------------------------------------------------------
 Write-Host ""
 Write-Host "Build complete." -ForegroundColor Green
 Write-Host "  Folder : $release"

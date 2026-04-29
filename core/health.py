@@ -58,3 +58,21 @@ def state() -> str:
     if ratio < 0.40 or disp == "down":
         return "down"
     return "unstable"
+
+
+def snapshot():
+    """Return windowed health metrics for richer GUI diagnostics."""
+    now = time.monotonic()
+    with _lock:
+        cutoff = now - _window_secs
+        while _window and _window[0][0] < cutoff:
+            _window.pop(0)
+        total = len(_window)
+        ok = sum(1 for _, b in _window if b)
+        err = total - ok
+
+    return {
+        "window_requests": total,
+        "window_errors": err,
+        "window_success_rate": (ok / total) if total else 1.0,
+    }

@@ -38,18 +38,35 @@ def configure_logging(level_name="INFO"):
     log_filter.install(window=2.0)
 
 
-def _emit_loop():
+def _emit_loop(active_interval=1.0, idle_interval=2.0):
+    active_interval = max(float(active_interval), 0.2)
+    idle_interval = max(float(idle_interval), active_interval)
     while True:
         try:
-            sys.stdout.write("##STATS## " + json.dumps(stats.snapshot()) + "\n")
+            snap = stats.snapshot()
+            sys.stdout.write("##STATS## " + json.dumps(snap) + "\n")
             sys.stdout.flush()
         except Exception:
-            pass
-        time.sleep(1.0)
+            snap = None
+
+        try:
+            idle = (snap is not None and
+                    snap.get("connections", 0) == 0 and
+                    snap.get("requests_per_sec", 0.0) <= 0.01)
+            time.sleep(idle_interval if idle else active_interval)
+        except Exception:
+            time.sleep(active_interval)
 
 
-def start_stats_emitter():
-    threading.Thread(target=_emit_loop, daemon=True, name="stats-emitter").start()
+def start_stats_emitter(cfg):
+    interval = cfg.get("stats_emit_interval", 1.0)
+    idle_interval = cfg.get("stats_idle_emit_interval", 2.0)
+    threading.Thread(
+        target=_emit_loop,
+        args=(interval, idle_interval),
+        daemon=True,
+        name="stats-emitter"
+    ).start()
 
 
 def _patch_proxy_server():
@@ -164,4 +181,4 @@ def install(cfg):
     multi_id.install(cfg)         # rotates ids, parks bad ones
     _patch_proxy_server()         # byte counters
     _patch_relay_health()         # request-level health probe
-    start_stats_emitter()
+    start_stats_emitter(cfg)

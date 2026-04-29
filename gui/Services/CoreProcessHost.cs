@@ -111,14 +111,29 @@ public class CoreProcessHost : IDisposable
         }
         catch { }
 
+        // Cancel stream readers early so they don't keep waiting on stale handles.
+        try { _cts?.Cancel(); } catch { }
+
         var done = await Task.Run(() => p.WaitForExit((int)timeout.TotalMilliseconds));
+        if (!done)
+        {
+            try
+            {
+                if (!p.HasExited) p.CloseMainWindow();
+            }
+            catch { }
+            done = await Task.Run(() => p.WaitForExit(1200));
+        }
         if (!done)
         {
             try { p.Kill(entireProcessTree: true); } catch { }
             await Task.Run(() => p.WaitForExit(3000));
         }
 
-        try { _cts?.Cancel(); } catch { }
+        lock (_lock)
+        {
+            if (ReferenceEquals(_proc, p)) _proc = null;
+        }
         StatusChanged?.Invoke("Stopped");
     }
 

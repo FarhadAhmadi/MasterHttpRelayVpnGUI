@@ -10,6 +10,7 @@ Supports:
 """
 
 import asyncio
+from collections import OrderedDict
 import logging
 import re
 import ssl
@@ -21,42 +22,46 @@ log = logging.getLogger("Proxy")
 
 
 class ResponseCache:
-    """Simple LRU response cache — avoids repeated relay calls."""
+    """LRU response cache with TTL and lightweight observability."""
 
     def __init__(self, max_mb: int = 50):
-        self._store: dict[str, tuple[bytes, float]] = {}
+        self._store: OrderedDict[str, tuple[bytes, float]] = OrderedDict()
         self._size = 0
         self._max = max_mb * 1024 * 1024
-        self.hits = 0
-        self.misses = 0
 
-    def get(self, url: str) -> bytes | None:
-        entry = self._store.get(url)
+    def get(self, key: str) -> bytes | None:
+        entry = self._store.get(key)
         if not entry:
-            self.misses += 1
             return None
         raw, expires = entry
         if time.time() > expires:
             self._size -= len(raw)
-            del self._store[url]
-            self.misses += 1
+            del self._store[key]
             return None
-        self.hits += 1
+        self._store.move_to_end(key)
         return raw
 
-    def put(self, url: str, raw_response: bytes, ttl: int = 300):
+    def put(self, key: str, raw_response: bytes, ttl: int = 300):
         size = len(raw_response)
         if size > self._max // 4 or size == 0:
             return
         # Evict oldest to make room
         while self._size + size > self._max and self._store:
-            oldest = next(iter(self._store))
-            self._size -= len(self._store[oldest][0])
-            del self._store[oldest]
-        if url in self._store:
-            self._size -= len(self._store[url][0])
-        self._store[url] = (raw_response, time.time() + ttl)
+            _, (old_raw, _) = self._store.popitem(last=False)
+            self._size -= len(old_raw)
+        if key in self._store:
+            self._size -= len(self._store[key][0])
+        self._store[key] = (raw_response, time.time() + ttl)
+        self._store.move_to_end(key)
         self._size += size
+
+    @property
+    def count(self) -> int:
+        return len(self._store)
+
+    @property
+    def bytes_size(self) -> int:
+        return self._size
 
     @staticmethod
     def parse_ttl(raw_response: bytes, url: str) -> int:
@@ -69,7 +74,9 @@ class ResponseCache:
         # Don't cache errors or non-200
         if b"HTTP/1.1 200" not in raw_response[:20]:
             return 0
-        if "no-store" in hdr:
+        if "no-store" in hdr or "private" in hdr or "no-cache" in hdr:
+            return 0
+        if "set-cookie:" in hdr:
             return 0
 
         # Explicit max-age
@@ -108,6 +115,8 @@ class ProxyServer:
         self.fronter = DomainFronter(config)
         self.mitm = None
         self._cache = ResponseCache(max_mb=50)
+        self._cache_inflight: dict[str, asyncio.Future] = {}
+        self._cache_inflight_lock = asyncio.Lock()
 
         # Persistent HTTP tunnel cache for google_fronting mode
         # Key: "host:port" → (tunnel_reader, tunnel_writer, lock)
@@ -126,6 +135,80 @@ class ProxyServer:
                 log.error("apps_script mode requires 'cryptography' package.")
                 log.error("Run: pip install cryptography")
                 raise SystemExit(1)
+
+    def _cache_key(self, method: str, url: str, headers: dict) -> str:
+        """Build a conservative key so cached responses are safe to reuse."""
+        vary = (
+            headers.get("Accept", ""),
+            headers.get("Accept-Encoding", ""),
+            headers.get("Accept-Language", ""),
+        )
+        return "|".join([method.upper(), url, *vary])
+
+    @staticmethod
+    def _cacheable_request(method: str, body: bytes, headers: dict) -> bool:
+        if method.upper() != "GET" or body:
+            return False
+        cc = headers.get("Cache-Control", "")
+        pragma = headers.get("Pragma", "")
+        return "no-cache" not in cc.lower() and "no-cache" not in pragma.lower()
+
+    def _emit_cache_stats(self):
+        try:
+            import stats
+            stats.cache_snapshot(self._cache.count, self._cache.bytes_size)
+        except Exception:
+            pass
+
+    async def _fetch_with_cache(self, method: str, url: str, headers: dict, body: bytes):
+        if not self._cacheable_request(method, body, headers):
+            return await self._relay_smart(method, url, headers, body)
+
+        key = self._cache_key(method, url, headers)
+        cached = self._cache.get(key)
+        if cached is not None:
+            try:
+                import stats
+                stats.cache_hit()
+            except Exception:
+                pass
+            return cached
+
+        leader = False
+        async with self._cache_inflight_lock:
+            fut = self._cache_inflight.get(key)
+            if fut is None:
+                fut = asyncio.get_running_loop().create_future()
+                self._cache_inflight[key] = fut
+                leader = True
+
+        if not leader:
+            try:
+                return await asyncio.wait_for(fut, timeout=20)
+            except Exception:
+                pass
+
+        try:
+            try:
+                import stats
+                stats.cache_miss()
+            except Exception:
+                pass
+            response = await self._relay_smart(method, url, headers, body)
+            ttl = ResponseCache.parse_ttl(response, url)
+            if ttl > 0:
+                self._cache.put(key, response, ttl)
+                self._emit_cache_stats()
+            if not fut.done():
+                fut.set_result(response)
+            return response
+        except Exception as e:
+            if not fut.done():
+                fut.set_exception(e)
+            raise
+        finally:
+            async with self._cache_inflight_lock:
+                self._cache_inflight.pop(key, None)
 
     async def start(self):
         srv = await asyncio.start_server(self._on_client, self.host, self.port)
@@ -500,33 +583,17 @@ class ProxyServer:
                     await writer.drain()
                     continue
 
-                # Check local cache first (GET only)
-                response = None
-                if method == "GET" and not body:
-                    response = self._cache.get(url)
-                    if response:
-                        log.debug("Cache HIT: %s", url[:60])
-
-                if response is None:
-                    # Relay through Apps Script
-                    try:
-                        response = await self._relay_smart(method, url, headers, body)
-                    except Exception as e:
-                        log.error("Relay error (%s): %s", url[:60], e)
-                        err_body = f"Relay error: {e}".encode()
-                        response = (
-                            b"HTTP/1.1 502 Bad Gateway\r\n"
-                            b"Content-Type: text/plain\r\n"
-                            b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
-                            b"\r\n" + err_body
-                        )
-
-                    # Cache successful GET responses
-                    if method == "GET" and not body and response:
-                        ttl = ResponseCache.parse_ttl(response, url)
-                        if ttl > 0:
-                            self._cache.put(url, response, ttl)
-                            log.debug("Cached (%ds): %s", ttl, url[:60])
+                try:
+                    response = await self._fetch_with_cache(method, url, headers, body)
+                except Exception as e:
+                    log.error("Relay error (%s): %s", url[:60], e)
+                    err_body = f"Relay error: {e}".encode()
+                    response = (
+                        b"HTTP/1.1 502 Bad Gateway\r\n"
+                        b"Content-Type: text/plain\r\n"
+                        b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
+                        b"\r\n" + err_body
+                    )
 
                 # Inject permissive CORS headers whenever the browser
                 # sent an Origin (cross-origin XHR / fetch).
@@ -690,20 +757,7 @@ class ProxyServer:
                 await writer.drain()
                 return
 
-            # Cache check for GET
-            response = None
-            if method == "GET" and not body:
-                response = self._cache.get(url)
-                if response:
-                    log.debug("Cache HIT (HTTP): %s", url[:60])
-
-            if response is None:
-                response = await self._relay_smart(method, url, headers, body)
-                # Cache successful GET
-                if method == "GET" and not body and response:
-                    ttl = ResponseCache.parse_ttl(response, url)
-                    if ttl > 0:
-                        self._cache.put(url, response, ttl)
+            response = await self._fetch_with_cache(method, url, headers, body)
 
             # Inject CORS headers for cross-origin requests
             if origin and response:

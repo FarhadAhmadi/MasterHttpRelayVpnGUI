@@ -31,6 +31,8 @@ public class AppConfig
     // Multi-ID tuning
     [JsonPropertyName("multi_id_fail_threshold")]   public int MultiIdFailThreshold { get; set; } = 3;
     [JsonPropertyName("multi_id_cooldown_seconds")] public int MultiIdCooldownSeconds { get; set; } = 30;
+    [JsonPropertyName("multi_id_strategy")]         public string MultiIdStrategy { get; set; } = "balanced";
+    [JsonPropertyName("multi_id_max_consecutive")]  public int MultiIdMaxConsecutive { get; set; } = 2;
 
     // GUI persistence
     [JsonPropertyName("language")]        public string Language { get; set; } = "en";   // "en" | "fa"

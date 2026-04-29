@@ -14,6 +14,10 @@ _last_t = time.time()
 _last_up = 0
 _last_down = 0
 _last_requests = 0
+_cache_hits = 0
+_cache_misses = 0
+_cache_entries = 0
+_cache_bytes = 0
 
 
 def add_up(n):
@@ -48,12 +52,33 @@ def conn_closed():
             _conn_open -= 1
 
 
+def cache_hit():
+    global _cache_hits
+    with _lock:
+        _cache_hits += 1
+
+
+def cache_miss():
+    global _cache_misses
+    with _lock:
+        _cache_misses += 1
+
+
+def cache_snapshot(entries, size_bytes):
+    global _cache_entries, _cache_bytes
+    with _lock:
+        _cache_entries = max(int(entries), 0)
+        _cache_bytes = max(int(size_bytes), 0)
+
+
 def snapshot():
     global _last_t, _last_up, _last_down, _last_requests
     now = time.time()
     with _lock:
         up, down = _bytes_up, _bytes_down
         co, peak, reqs = _conn_open, _conn_peak, _requests
+        ch, cm = _cache_hits, _cache_misses
+        ce, cb = _cache_entries, _cache_bytes
 
     dt = max(now - _last_t, 0.001)
     sup = (up - _last_up) / dt
@@ -67,6 +92,7 @@ def snapshot():
         import multi_id as _multi
         h = _health.state()
         ep = _multi.snapshot()
+        hx = _health.snapshot()
     except Exception:
         h = "good"
         ep = {
@@ -76,6 +102,11 @@ def snapshot():
             "success_rate": 1.0,
             "active_endpoint": "",
         }
+        hx = {
+            "window_requests": 0,
+            "window_errors": 0,
+            "window_success_rate": 1.0,
+        }
 
     return {
         "uptime": int(now - _started),
@@ -83,7 +114,13 @@ def snapshot():
         "speed_up": sup, "speed_down": sdown,
         "requests": reqs,
         "connections": co, "peak_connections": peak,
+        "cache_hits": ch,
+        "cache_misses": cm,
+        "cache_hit_rate": (ch / (ch + cm)) if (ch + cm) else 0.0,
+        "cache_entries": ce,
+        "cache_bytes": cb,
         "health": h,
         "requests_per_sec": rps,
         **ep,
+        **hx,
     }
