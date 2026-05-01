@@ -10,6 +10,7 @@ endpoints again after cooldown.
 import logging
 import threading
 import time
+from collections import deque
 from contextvars import ContextVar
 
 log = logging.getLogger("MultiID")
@@ -18,7 +19,7 @@ log = logging.getLogger("MultiID")
 class _Endpoint:
     __slots__ = (
         "sid", "ok", "err", "recent_failures", "parked_until",
-        "last_err", "latency_ms", "last_used", "uses",
+        "last_err", "latency_ms", "last_used", "uses", "events",
     )
 
     def __init__(self, sid):
@@ -31,6 +32,7 @@ class _Endpoint:
         self.latency_ms = 0.0
         self.last_used = 0.0
         self.uses = 0
+        self.events = deque(maxlen=6000)  # ~ keeps recent 15m+ request outcomes
 
     @property
     def total(self):
@@ -49,6 +51,25 @@ class _Endpoint:
         fairness_penalty = min(self.uses, 20) * 0.25
         return (self.success_rate * 50.0) - latency_penalty - failure_penalty - cooldown_penalty - fairness_penalty
 
+    def window_stats(self, now, windows=(60, 300, 900)):
+        out = {}
+        for w in windows:
+            total = 0
+            ok = 0
+            start = now - w
+            for ts, is_ok in reversed(self.events):
+                if ts < start:
+                    break
+                total += 1
+                if is_ok:
+                    ok += 1
+            out[w] = {
+                "total": total,
+                "ok": ok,
+                "success_rate": (ok / total) if total else 1.0,
+            }
+        return out
+
 
 class MultiIdDispatcher:
     def __init__(
@@ -64,13 +85,14 @@ class MultiIdDispatcher:
         self._fail_threshold = max(1, int(fail_threshold))
         self._cooldown = max(5.0, float(cooldown))
         self._strategy = (strategy or "balanced").strip().lower()
-        if self._strategy not in {"balanced", "round_robin", "least_used"}:
+        if self._strategy not in {"balanced", "round_robin", "least_used", "fair_spread"}:
             self._strategy = "balanced"
         self._max_consecutive = max(1, int(max_consecutive))
         self._active_sid = ""
         self._rr = 0
         self._last_sid = ""
         self._consecutive = 0
+        self._global_recent_errors = 0
 
     @property
     def count(self):
@@ -111,9 +133,20 @@ class MultiIdDispatcher:
             ordered = sorted(live, key=lambda e: (e.uses, -e.success_rate, e.latency_ms or 0.0))
             return self._apply_consecutive_cap(ordered)
 
+        if self._strategy == "fair_spread":
+            # Prioritize equal usage, then quality safeguards.
+            ordered = sorted(
+                live,
+                key=lambda e: (e.uses, e.recent_failures, e.latency_ms or 0.0, -e.success_rate),
+            )
+            return self._apply_consecutive_cap(ordered)
+
         ranked = sorted(live, key=lambda e: e.score(now), reverse=True)
         top_score = ranked[0].score(now)
-        eligible = [e for e in ranked if top_score - e.score(now) <= 12.0] or ranked[:1]
+        spread_window = 16.0 if len(live) >= 4 else 12.0
+        eligible = [e for e in ranked if top_score - e.score(now) <= spread_window] or ranked[:1]
+        # Favor lower-used relays among similarly scored candidates for stronger spreading.
+        eligible = sorted(eligible, key=lambda e: (e.uses, e.recent_failures, -(e.score(now))))
         return self._apply_consecutive_cap(eligible)
 
     def _apply_consecutive_cap(self, candidates):
@@ -136,8 +169,11 @@ class MultiIdDispatcher:
             if not ep:
                 return
             ep.ok += 1
+            ep.events.append((time.monotonic(), True))
             ep.recent_failures = 0
             ep.parked_until = 0.0
+            if self._global_recent_errors > 0:
+                self._global_recent_errors -= 1
             if latency_ms and latency_ms > 0:
                 ep.latency_ms = latency_ms if ep.latency_ms <= 0 else (ep.latency_ms * 0.75 + latency_ms * 0.25)
 
@@ -149,12 +185,19 @@ class MultiIdDispatcher:
             if not ep:
                 return
             ep.err += 1
+            ep.events.append((time.monotonic(), False))
             ep.recent_failures += 1
+            self._global_recent_errors = min(self._global_recent_errors + 1, 1000)
             ep.last_err = msg[:180] if msg else ""
             if ep.recent_failures >= self._fail_threshold:
-                ep.parked_until = time.monotonic() + self._cooldown
+                # Adaptive cooldown based on per-endpoint and global error pressure.
+                pressure = min(self._global_recent_errors / 20.0, 1.5)
+                endpoint_penalty = min(ep.recent_failures / max(self._fail_threshold, 1), 2.0)
+                adaptive = self._cooldown * (0.75 + 0.35 * pressure + 0.25 * endpoint_penalty)
+                adaptive = max(8.0, min(adaptive, self._cooldown * 2.5))
+                ep.parked_until = time.monotonic() + adaptive
                 log.warning("parking %s for %ds (%d failures)",
-                            _short(ep.sid), int(self._cooldown), ep.recent_failures)
+                            _short(ep.sid), int(adaptive), ep.recent_failures)
 
     def health(self):
         now = time.monotonic()
@@ -188,6 +231,7 @@ class MultiIdDispatcher:
             details = []
             for e in self._eps:
                 parked_for = max(0.0, e.parked_until - now)
+                win = e.window_stats(now)
                 details.append({
                     "id": _short(e.sid),
                     "ok": e.ok,
@@ -198,6 +242,9 @@ class MultiIdDispatcher:
                     "parked_for_s": int(parked_for),
                     "uses": e.uses,
                     "success_rate": e.success_rate,
+                    "window_1m": win[60],
+                    "window_5m": win[300],
+                    "window_15m": win[900],
                 })
             return {
                 "endpoints": len(self._eps),

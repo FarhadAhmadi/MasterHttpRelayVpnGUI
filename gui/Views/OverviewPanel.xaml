@@ -1,0 +1,72 @@
+<UserControl x:Class="MasterRelayVPN.Views.OverviewPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DesignHeight="400"
+             d:DesignWidth="640">
+    <UserControl.Resources>
+        <Style x:Key="SubButton" TargetType="Button" BasedOn="{StaticResource GhostButton}">
+            <Setter Property="Padding" Value="9,5"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+        <Style x:Key="AnalyticsCardLocal" TargetType="Border" BasedOn="{StaticResource MetricTile}">
+            <Setter Property="Padding" Value="12"/>
+            <Setter Property="Margin" Value="0,0,8,8"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsCompactDensity}" Value="True">
+                    <Setter Property="Padding" Value="8"/>
+                    <Setter Property="Margin" Value="0,0,6,6"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </UserControl.Resources>
+
+    <Border Style="{StaticResource Panel}" Padding="12">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <StackPanel>
+                <TextBlock Text="Overview" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                    <Button Content="Health" Style="{StaticResource SubButton}"
+                            Command="{Binding SetStatsSubsectionCmd}" CommandParameter="health"/>
+                    <Button Content="Traffic" Style="{StaticResource SubButton}"
+                            Command="{Binding SetStatsSubsectionCmd}" CommandParameter="traffic"/>
+                    <Button Content="Quality" Style="{StaticResource SubButton}"
+                            Command="{Binding SetStatsSubsectionCmd}" CommandParameter="quality"/>
+                </StackPanel>
+            </StackPanel>
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+                    <UniformGrid Columns="4" Margin="0,0,0,6">
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Latency" Style="{StaticResource Caption}"/><TextBlock Text="{Binding LatencyLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Download" Style="{StaticResource Caption}"/><TextBlock Text="{Binding SpeedDown}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Upload" Style="{StaticResource Caption}"/><TextBlock Text="{Binding SpeedUp}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Success" Style="{StaticResource Caption}"/><TextBlock Text="{Binding SuccessRateLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                    </UniformGrid>
+                    <Border Style="{StaticResource AnalyticsCardLocal}" Margin="0,0,0,8">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <StackPanel><TextBlock Text="Throughput Trend" Style="{StaticResource Caption}"/><TextBlock Text="{Binding ThroughputTrendLabel}" FontFamily="Cascadia Mono, Consolas"/></StackPanel>
+                            <StackPanel Grid.Column="2"><TextBlock Text="Latency Trend" Style="{StaticResource Caption}"/><TextBlock Text="{Binding LatencyTrendLabel}" FontFamily="Cascadia Mono, Consolas"/></StackPanel>
+                        </Grid>
+                    </Border>
+                    <UniformGrid Columns="4" Margin="0,0,0,6">
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Endpoint Health" Style="{StaticResource Caption}"/><TextBlock Text="{Binding EndpointLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Window Success" Style="{StaticResource Caption}"/><TextBlock Text="{Binding WindowSuccessRateLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Window Errors" Style="{StaticResource Caption}"/><TextBlock Text="{Binding WindowErrorsLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Peak Connections" Style="{StaticResource Caption}"/><TextBlock Text="{Binding PeakConnectionsLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                    </UniformGrid>
+                    <Border Style="{StaticResource Panel}">
+                        <TextBlock Text="{Binding Diagnostics}" TextWrapping="Wrap"/>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Border>
+</UserControl>

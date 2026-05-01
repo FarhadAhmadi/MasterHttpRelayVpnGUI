@@ -1,6 +1,9 @@
-# Runtime deps for MasterRelayCore. Wheels available for Python 3.10-3.13 on win-x64.
+# Core runtime deps
 cryptography>=42.0,<46.0
 h2>=4.1,<5.0
+certifi>=2024.1.0; sys_platform != "win32"
+brotli>=1.1.0
+zstandard>=0.22.0
 
 # Build-only
 pyinstaller>=6.6,<7.0

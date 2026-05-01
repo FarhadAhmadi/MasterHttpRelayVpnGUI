@@ -1,0 +1,72 @@
+<UserControl x:Class="MasterRelayVPN.Views.SupportPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DesignHeight="400"
+             d:DesignWidth="640">
+    <UserControl.Resources>
+        <Style x:Key="SubButton" TargetType="Button" BasedOn="{StaticResource GhostButton}">
+            <Setter Property="Padding" Value="9,5"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+        <Style x:Key="AnalyticsCardLocal" TargetType="Border" BasedOn="{StaticResource MetricTile}">
+            <Setter Property="Padding" Value="12"/>
+            <Setter Property="Margin" Value="0,0,8,8"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsCompactDensity}" Value="True">
+                    <Setter Property="Padding" Value="8"/>
+                    <Setter Property="Margin" Value="0,0,6,6"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </UserControl.Resources>
+
+    <Border Style="{StaticResource Panel}" Padding="12">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <TextBlock Text="Support" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button Content="Copy Support Summary" Style="{StaticResource GhostButton}" Command="{Binding CopySupportSummaryCmd}" Padding="10,6" Margin="0,0,6,0"/>
+                        <Button Content="Copy Runtime Snapshot" Style="{StaticResource GhostButton}" Command="{Binding CopyRuntimeSnapshotCmd}" Padding="10,6" Margin="0,0,6,0"/>
+                        <Button Content="Export Diagnostics" Style="{StaticResource GhostButton}" Command="{Binding ExportDiagnosticsBundleCmd}" Padding="10,6"/>
+                    </StackPanel>
+                </Grid>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                    <Button Content="Quick Copy" Style="{StaticResource SubButton}" Command="{Binding SetStatsSubsectionCmd}" CommandParameter="support_copy"/>
+                    <Button Content="Bundle Export" Style="{StaticResource SubButton}" Command="{Binding SetStatsSubsectionCmd}" CommandParameter="support_bundle"/>
+                    <Button Content="Paths" Style="{StaticResource SubButton}" Command="{Binding SetStatsSubsectionCmd}" CommandParameter="support_paths"/>
+                </StackPanel>
+            </StackPanel>
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+                    <Border Style="{StaticResource AnalyticsCardLocal}" Margin="0,0,0,8">
+                        <StackPanel><TextBlock Text="Config Path" Style="{StaticResource Caption}"/><TextBlock Text="{Binding ConfigPathLabel}" FontFamily="Cascadia Mono, Consolas" TextWrapping="Wrap"/></StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource AnalyticsCardLocal}" Margin="0,0,0,8">
+                        <StackPanel><TextBlock Text="Core Path" Style="{StaticResource Caption}"/><TextBlock Text="{Binding CorePathLabel}" FontFamily="Cascadia Mono, Consolas" TextWrapping="Wrap"/></StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource AnalyticsCardLocal}" Margin="0">
+                        <StackPanel><TextBlock Text="Data Path" Style="{StaticResource Caption}"/><TextBlock Text="{Binding DataPathLabel}" FontFamily="Cascadia Mono, Consolas" TextWrapping="Wrap"/></StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource AnalyticsCardLocal}" Margin="0,8,0,0">
+                        <StackPanel>
+                            <TextBlock Text="Live Summary" Style="{StaticResource Caption}"/>
+                            <TextBlock Text="{Binding Diagnostics}" TextWrapping="Wrap"/>
+                            <TextBlock Text="{Binding RelayRoutingLabel}" Margin="0,6,0,0" Foreground="{StaticResource FgDimBrush}"/>
+                            <TextBlock Text="{Binding EndpointLabel}" Foreground="{StaticResource FgDimBrush}"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Border>
+</UserControl>

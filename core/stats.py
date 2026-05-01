@@ -16,6 +16,7 @@ _last_down = 0
 _last_requests = 0
 _cache_hits = 0
 _cache_misses = 0
+_cache_stale_hits = 0
 _cache_entries = 0
 _cache_bytes = 0
 
@@ -64,6 +65,12 @@ def cache_miss():
         _cache_misses += 1
 
 
+def cache_stale_hit():
+    global _cache_stale_hits
+    with _lock:
+        _cache_stale_hits += 1
+
+
 def cache_snapshot(entries, size_bytes):
     global _cache_entries, _cache_bytes
     with _lock:
@@ -77,7 +84,7 @@ def snapshot():
     with _lock:
         up, down = _bytes_up, _bytes_down
         co, peak, reqs = _conn_open, _conn_peak, _requests
-        ch, cm = _cache_hits, _cache_misses
+        ch, cm, csh = _cache_hits, _cache_misses, _cache_stale_hits
         ce, cb = _cache_entries, _cache_bytes
 
     dt = max(now - _last_t, 0.001)
@@ -116,7 +123,9 @@ def snapshot():
         "connections": co, "peak_connections": peak,
         "cache_hits": ch,
         "cache_misses": cm,
+        "cache_stale_hits": csh,
         "cache_hit_rate": (ch / (ch + cm)) if (ch + cm) else 0.0,
+        "cache_effective_hit_rate": ((ch + csh) / (ch + cm)) if (ch + cm) else 0.0,
         "cache_entries": ce,
         "cache_bytes": cb,
         "health": h,

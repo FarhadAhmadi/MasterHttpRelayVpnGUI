@@ -2,6 +2,7 @@ using System;
 using System.Collections.Specialized;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using MasterRelayVPN.ViewModels;
 
@@ -83,8 +84,6 @@ public partial class MainWindow : Window
             ? "Switch back to Max mode for more panels on screen."
             : "Switch to Minimal mode for compact layout.";
 
-        if (QuickMetricsGrid != null)
-            QuickMetricsGrid.Visibility = _isMiniMode ? Visibility.Collapsed : Visibility.Visible;
         if (PresetPanel != null)
             PresetPanel.Visibility = _isMiniMode ? Visibility.Collapsed : Visibility.Visible;
         if (BottomStatusTiles != null)
@@ -95,15 +94,6 @@ public partial class MainWindow : Window
             TitleBlock.Visibility = _isMiniMode ? Visibility.Collapsed : Visibility.Visible;
         if (LeftControlPanel != null)
             LeftControlPanel.Margin = _isMiniMode ? new Thickness(0, 0, 8, 0) : new Thickness(0, 0, 18, 0);
-        if (RelaysTab != null)
-            RelaysTab.Visibility = _isMiniMode ? Visibility.Collapsed : Visibility.Visible;
-        if (SoftwareTab != null)
-            SoftwareTab.Visibility = _isMiniMode ? Visibility.Collapsed : Visibility.Visible;
-
-        if (_isMiniMode && IsTabItemSelected(RelaysTab))
-            SelectFirstAvailableTab();
-        if (_isMiniMode && IsTabItemSelected(SoftwareTab))
-            SelectFirstAvailableTab();
 
         if (WindowState == WindowState.Maximized) return;
 
@@ -111,20 +101,25 @@ public partial class MainWindow : Window
         Height = _isMiniMode ? MiniHeight : MaxHeightMode;
     }
 
-    static bool IsTabItemSelected(TabItem? tab)
-        => tab != null && tab.IsSelected;
-
-    void SelectFirstAvailableTab()
+    void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        var tabControl = FindVisualChild<TabControl>(this);
-        if (tabControl == null) return;
-        foreach (var item in tabControl.Items)
+        if (DataContext is not MainViewModel vm) return;
+        if ((Keyboard.Modifiers & ModifierKeys.Control) == 0) return;
+
+        if (e.Key == Key.D1 || e.Key == Key.NumPad1)
         {
-            if (item is TabItem t && t.Visibility == Visibility.Visible)
-            {
-                t.IsSelected = true;
-                return;
-            }
+            vm.SetDashboardSectionCmd.Execute("home");
+            e.Handled = true;
+        }
+        else if (e.Key == Key.D2 || e.Key == Key.NumPad2)
+        {
+            vm.SetDashboardSectionCmd.Execute("analytics");
+            e.Handled = true;
+        }
+        else if (e.Key == Key.D3 || e.Key == Key.NumPad3)
+        {
+            vm.SetDashboardSectionCmd.Execute("settings");
+            e.Handled = true;
         }
     }
 

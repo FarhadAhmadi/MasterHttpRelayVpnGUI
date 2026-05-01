@@ -14,6 +14,16 @@ public class RelayEndpointDetail
     [JsonPropertyName("parked_for_s")]    public int ParkedForS { get; set; }
     [JsonPropertyName("uses")]            public int Uses { get; set; }
     [JsonPropertyName("success_rate")]    public double SuccessRate { get; set; }
+    [JsonPropertyName("window_1m")]       public RelayWindowStat Window1M { get; set; } = new();
+    [JsonPropertyName("window_5m")]       public RelayWindowStat Window5M { get; set; } = new();
+    [JsonPropertyName("window_15m")]      public RelayWindowStat Window15M { get; set; } = new();
+}
+
+public class RelayWindowStat
+{
+    [JsonPropertyName("total")] public int Total { get; set; }
+    [JsonPropertyName("ok")] public int Ok { get; set; }
+    [JsonPropertyName("success_rate")] public double SuccessRate { get; set; } = 1.0;
 }
 
 public class StatsSnapshot
@@ -40,7 +50,9 @@ public class StatsSnapshot
     [JsonPropertyName("window_success_rate")] public double WindowSuccessRate { get; set; } = 1;
     [JsonPropertyName("cache_hits")]        public int CacheHits { get; set; } = 0;
     [JsonPropertyName("cache_misses")]      public int CacheMisses { get; set; } = 0;
+    [JsonPropertyName("cache_stale_hits")]  public int CacheStaleHits { get; set; } = 0;
     [JsonPropertyName("cache_hit_rate")]    public double CacheHitRate { get; set; } = 0;
+    [JsonPropertyName("cache_effective_hit_rate")] public double CacheEffectiveHitRate { get; set; } = 0;
     [JsonPropertyName("cache_entries")]     public int CacheEntries { get; set; } = 0;
     [JsonPropertyName("cache_bytes")]       public long CacheBytes { get; set; } = 0;
     [JsonPropertyName("endpoints_detail")]  public List<RelayEndpointDetail> EndpointsDetail { get; set; } = new();

@@ -1,0 +1,104 @@
+<UserControl x:Class="MasterRelayVPN.Views.AnalyticsPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:views="clr-namespace:MasterRelayVPN.Views"
+             mc:Ignorable="d"
+             d:DesignHeight="600"
+             d:DesignWidth="900">
+    <UserControl.Resources>
+        <Style x:Key="SectionButton" TargetType="Button" BasedOn="{StaticResource GhostButton}">
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="Padding" Value="12,9"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+        </Style>
+    </UserControl.Resources>
+
+    <Border Style="{StaticResource Panel}" Padding="20">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Text="Analytics Workspace" FontSize="20" FontWeight="SemiBold"/>
+                    <TextBlock Text="Admin-style monitoring and support tools with stable section switching."
+                               Foreground="{StaticResource FgDimBrush}" Margin="0,4,0,0"/>
+                </StackPanel>
+                <Button Grid.Column="1" Content="Toggle Density" Style="{StaticResource GhostButton}"
+                        Command="{Binding ToggleDensityCmd}" Padding="10,6"/>
+            </Grid>
+
+            <Grid Grid.Row="1" Margin="0,14,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="210"/>
+                    <ColumnDefinition Width="12"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0" Style="{StaticResource Panel}" Padding="12">
+                    <StackPanel>
+                        <TextBlock Text="Sections" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                        <Button Content="Overview" Style="{StaticResource SectionButton}"
+                                Command="{Binding SetStatsSectionCmd}" CommandParameter="overview"/>
+                        <Button Content="Relays" Style="{StaticResource SectionButton}"
+                                Command="{Binding SetStatsSectionCmd}" CommandParameter="relays"/>
+                        <Button Content="Support" Style="{StaticResource SectionButton}"
+                                Command="{Binding SetStatsSectionCmd}" CommandParameter="support"/>
+                    </StackPanel>
+                </Border>
+
+                <Grid Grid.Column="2">
+                    <views:OverviewPanel>
+                        <views:OverviewPanel.Style>
+                            <Style TargetType="views:OverviewPanel">
+                                <Setter Property="Visibility" Value="Visible"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding StatsSection}" Value="relays">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding StatsSection}" Value="support">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </views:OverviewPanel.Style>
+                    </views:OverviewPanel>
+
+                    <views:RelaysPanel>
+                        <views:RelaysPanel.Style>
+                            <Style TargetType="views:RelaysPanel">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding StatsSection}" Value="relays">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </views:RelaysPanel.Style>
+                    </views:RelaysPanel>
+
+                    <views:SupportPanel>
+                        <views:SupportPanel.Style>
+                            <Style TargetType="views:SupportPanel">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding StatsSection}" Value="support">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </views:SupportPanel.Style>
+                    </views:SupportPanel>
+                </Grid>
+            </Grid>
+        </Grid>
+    </Border>
+</UserControl>

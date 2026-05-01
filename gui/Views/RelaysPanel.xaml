@@ -1,0 +1,107 @@
+<UserControl x:Class="MasterRelayVPN.Views.RelaysPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DesignHeight="400"
+             d:DesignWidth="640">
+    <UserControl.Resources>
+        <Style x:Key="SubButton" TargetType="Button" BasedOn="{StaticResource GhostButton}">
+            <Setter Property="Padding" Value="9,5"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+        <Style x:Key="AnalyticsCardLocal" TargetType="Border" BasedOn="{StaticResource MetricTile}">
+            <Setter Property="Padding" Value="12"/>
+            <Setter Property="Margin" Value="0,0,8,8"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsCompactDensity}" Value="True">
+                    <Setter Property="Padding" Value="8"/>
+                    <Setter Property="Margin" Value="0,0,6,6"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </UserControl.Resources>
+
+    <Border Style="{StaticResource Panel}" Padding="12">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <TextBlock Text="Relays" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button Content="Export Relay Status" Style="{StaticResource GhostButton}" Command="{Binding ExportRelayStatusCmd}" Padding="10,6" Margin="0,0,6,0"/>
+                        <Button Content="Copy Relay Status" Style="{StaticResource GhostButton}" Command="{Binding CopyRelayStatusCmd}" Padding="10,6"/>
+                    </StackPanel>
+                </Grid>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                    <Button Content="Health" Style="{StaticResource SubButton}" Command="{Binding SetStatsSubsectionCmd}" CommandParameter="relay_health"/>
+                    <Button Content="Distribution" Style="{StaticResource SubButton}" Command="{Binding SetStatsSubsectionCmd}" CommandParameter="relay_distribution"/>
+                    <Button Content="History" Style="{StaticResource SubButton}" Command="{Binding SetStatsSubsectionCmd}" CommandParameter="relay_history"/>
+                </StackPanel>
+                <TextBlock Text="{Binding ActiveEndpointLabel}" Foreground="{StaticResource FgDimBrush}" Margin="0,0,0,8"/>
+            </StackPanel>
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+                    <UniformGrid Columns="4" Margin="0,0,0,6">
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Configured Relays" Style="{StaticResource Caption}"/><TextBlock Text="{Binding ConfiguredRelaysCountLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Enabled Relays" Style="{StaticResource Caption}"/><TextBlock Text="{Binding EnabledRelaysCountLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Endpoint Health" Style="{StaticResource Caption}"/><TextBlock Text="{Binding EndpointLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Routing" Style="{StaticResource Caption}"/><TextBlock Text="{Binding RelayRoutingLabel}" TextWrapping="Wrap"/></StackPanel></Border>
+                    </UniformGrid>
+                    <UniformGrid Columns="4" Margin="0,0,0,6">
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Cache Hit" Style="{StaticResource Caption}"/><TextBlock Text="{Binding CacheHitRateLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Effective Hit" Style="{StaticResource Caption}"/><TextBlock Text="{Binding CacheEffectiveHitRateLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Stale Hits" Style="{StaticResource Caption}"/><TextBlock Text="{Binding CacheStaleHitsLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Cache Size" Style="{StaticResource Caption}"/><TextBlock Text="{Binding CacheSizeLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                    </UniformGrid>
+                    <Border Style="{StaticResource AnalyticsCardLocal}" Margin="0,0,0,8">
+                        <TextBlock Text="{Binding ConfiguredRelaysPreview}" FontFamily="Cascadia Mono, Consolas" TextWrapping="Wrap"/>
+                    </Border>
+                    <Border Style="{StaticResource AnalyticsCardLocal}" Margin="0">
+                        <Grid>
+                            <ListView ItemsSource="{Binding RelayDetails}" Background="Transparent" BorderThickness="0">
+                                <ListView.View>
+                                    <GridView>
+                                        <GridViewColumn Header="Relay" Width="120" DisplayMemberBinding="{Binding Id}"/>
+                                        <GridViewColumn Header="OK" Width="55" DisplayMemberBinding="{Binding Ok}"/>
+                                        <GridViewColumn Header="Err" Width="55" DisplayMemberBinding="{Binding Err}"/>
+                                        <GridViewColumn Header="Latency" Width="80" DisplayMemberBinding="{Binding LatencyMs, StringFormat={}{0:0} ms}"/>
+                                        <GridViewColumn Header="Uses" Width="60" DisplayMemberBinding="{Binding Uses}"/>
+                                        <GridViewColumn Header="Recent Fail" Width="90" DisplayMemberBinding="{Binding RecentFailures}"/>
+                                        <GridViewColumn Header="Parked" Width="90" DisplayMemberBinding="{Binding ParkedForS, StringFormat={}{0}s}"/>
+                                        <GridViewColumn Header="1m SR" Width="75" DisplayMemberBinding="{Binding Window1M.SuccessRate, StringFormat={}{0:P0}}"/>
+                                        <GridViewColumn Header="5m SR" Width="75" DisplayMemberBinding="{Binding Window5M.SuccessRate, StringFormat={}{0:P0}}"/>
+                                        <GridViewColumn Header="15m SR" Width="75" DisplayMemberBinding="{Binding Window15M.SuccessRate, StringFormat={}{0:P0}}"/>
+                                    </GridView>
+                                </ListView.View>
+                            </ListView>
+                            <TextBlock Text="No relay rows yet. Start the core or wait for traffic to populate this table."
+                                       Foreground="{StaticResource FgDimBrush}"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       FontStyle="Italic"
+                                       IsHitTestVisible="False">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding RelayDetails.Count}" Value="0">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Border>
+</UserControl>

@@ -13,6 +13,7 @@ Requires: pip install cryptography
 import datetime
 import logging
 import os
+import re
 import ssl
 import tempfile
 
@@ -23,9 +24,24 @@ from cryptography.x509.oid import NameOID
 
 log = logging.getLogger("MITM")
 
-CA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca")
+# CA lives at the project root (../ca/ relative to this file in src/).
+# The installed trusted root was generated there; keep using it.
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_THIS_DIR)
+CA_DIR = os.path.join(_PROJECT_ROOT, "ca")
 CA_KEY_FILE = os.path.join(CA_DIR, "ca.key")
 CA_CERT_FILE = os.path.join(CA_DIR, "ca.crt")
+
+
+# Filename-safe form of an SNI / hostname.  Windows forbids colons,
+# question marks, etc., so IPv6 literals (and stray Unicode) must be
+# rewritten before they become part of a cached cert file path.
+_UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_domain_filename(domain: str) -> str:
+    cleaned = _UNSAFE_NAME_RE.sub("_", domain.strip(".").lower())
+    return cleaned[:120] or "unknown"
 
 
 class MITMCertManager:
@@ -95,6 +111,13 @@ class MITMCertManager:
                     serialization.NoEncryption(),
                 )
             )
+        # Restrict the CA private key to the current user on POSIX.
+        # os.chmod is a no-op for permission bits on Windows.
+        if os.name == "posix":
+            try:
+                os.chmod(CA_KEY_FILE, 0o600)
+            except OSError:
+                pass
         with open(CA_CERT_FILE, "wb") as f:
             f.write(self._ca_cert.public_bytes(serialization.Encoding.PEM))
 
@@ -105,8 +128,9 @@ class MITMCertManager:
         if domain not in self._ctx_cache:
             key_pem, cert_pem = self._generate_domain_cert(domain)
 
-            cert_file = os.path.join(self._cert_dir, f"{domain}.crt")
-            key_file = os.path.join(self._cert_dir, f"{domain}.key")
+            safe = _safe_domain_filename(domain)
+            cert_file = os.path.join(self._cert_dir, f"{safe}.crt")
+            key_file = os.path.join(self._cert_dir, f"{safe}.key")
 
             ca_pem = self._ca_cert.public_bytes(serialization.Encoding.PEM)
             with open(cert_file, "wb") as f:
@@ -126,8 +150,16 @@ class MITMCertManager:
             public_exponent=65537, key_size=2048
         )
         subject = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, domain),
+            x509.NameAttribute(NameOID.COMMON_NAME, domain[:64] or "unknown"),
         ])
+
+        # SAN: IP literal vs DNS name — x509.DNSName rejects IPv6 literals.
+        import ipaddress as _ipaddress
+        try:
+            san_entry = x509.IPAddress(_ipaddress.ip_address(domain))
+        except ValueError:
+            san_entry = x509.DNSName(domain)
+
         now = datetime.datetime.now(datetime.timezone.utc)
         cert = (
             x509.CertificateBuilder()
@@ -138,7 +170,7 @@ class MITMCertManager:
             .not_valid_before(now)
             .not_valid_after(now + datetime.timedelta(days=365))
             .add_extension(
-                x509.SubjectAlternativeName([x509.DNSName(domain)]),
+                x509.SubjectAlternativeName([san_entry]),
                 critical=False,
             )
             .sign(self._ca_key, hashes.SHA256())

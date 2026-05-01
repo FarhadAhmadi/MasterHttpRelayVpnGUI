@@ -4,6 +4,7 @@
         xmlns:vm="clr-namespace:MasterRelayVPN.ViewModels"
         xmlns:m="clr-namespace:MasterRelayVPN.Models"
         xmlns:svc="clr-namespace:MasterRelayVPN.Services"
+        xmlns:views="clr-namespace:MasterRelayVPN.Views"
         Title="MasterRelayVPN"
         Width="1040" Height="700"
         MinWidth="820" MinHeight="560"
@@ -11,6 +12,7 @@
         Background="{StaticResource BgBrush}"
         WindowStartupLocation="CenterScreen"
         FontFamily="Segoe UI Variable, Segoe UI"
+        PreviewKeyDown="Window_PreviewKeyDown"
         FlowDirection="{Binding Loc.FlowDirection}">
 
     <Window.DataContext>
@@ -62,6 +64,55 @@
                         <TextBlock Text="MasterRelayVPN" FontSize="19" FontWeight="SemiBold"/>
                         <TextBlock Text="{Binding Loc[app_subtitle]}"
                                    Foreground="{StaticResource FgDimBrush}" FontSize="12"/>
+                        <TextBlock Text="{Binding DashboardBreadcrumb}"
+                                   Foreground="{StaticResource FgDimBrush}" FontSize="11" Margin="0,3,0,0"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="18,0,0,0" VerticalAlignment="Center">
+                        <Button Content="Home"
+                                Command="{Binding SetDashboardSectionCmd}" CommandParameter="home"
+                                Padding="12,7" Margin="0,0,8,0">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource GhostButton}">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding DashboardSection}" Value="home">
+                                            <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
+                                            <Setter Property="Foreground" Value="#FF062118"/>
+                                            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                        <Button Content="Analytics"
+                                Command="{Binding SetDashboardSectionCmd}" CommandParameter="analytics"
+                                Padding="12,7" Margin="0,0,8,0">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource GhostButton}">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding DashboardSection}" Value="analytics">
+                                            <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
+                                            <Setter Property="Foreground" Value="#FF062118"/>
+                                            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                        <Button Content="Settings"
+                                Command="{Binding SetDashboardSectionCmd}" CommandParameter="settings"
+                                Padding="12,7">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource GhostButton}">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding DashboardSection}" Value="settings">
+                                            <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
+                                            <Setter Property="Foreground" Value="#FF062118"/>
+                                            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
                     </StackPanel>
                 </StackPanel>
 
@@ -77,23 +128,41 @@
                     <Button Content="{Binding Loc.LanguageButtonLabel}"
                             Style="{StaticResource GhostButton}"
                             Command="{Binding ToggleLanguageCmd}" Padding="14,7" Margin="0,0,8,0"/>
-                    <Button Content="{Binding Loc[toggle_proxy]}"
+                    <Button Content="{Binding SysProxyActionLabel}"
                             Style="{StaticResource GhostButton}"
                             Command="{Binding ToggleSysProxyCmd}"
-                            ToolTip="Quickly enable/disable Windows proxy from header."
+                            ToolTip="{Binding SysProxyStateLabel}"
+                            Padding="12,7" Margin="0,0,8,0"/>
+                    <Button Content="Analyze &amp; Suggest"
+                            Style="{StaticResource GhostButton}"
+                            Command="{Binding AnalyzeAndRecommendCmd}"
+                            ToolTip="Review current relay/proxy state and apply tuning only (no relay removal)."
                             Padding="12,7" Margin="0,0,8,0"/>
                     <Button x:Name="WindowModeBtn" Content="Minimal"
                             Style="{StaticResource GhostButton}"
                             ToolTip="Switch between Mini and Max workspace layouts."
                             Click="WindowModeBtn_Click"
                             Padding="12,7" Margin="0,0,8,0"/>
-                    <Button Content="{Binding Loc[settings]}"
-                            Style="{StaticResource GhostButton}"
-                            Command="{Binding OpenSettingsCmd}" Padding="16,7"/>
                 </StackPanel>
             </Grid>
 
             <Grid Grid.Row="1">
+                <Grid.Style>
+                    <Style TargetType="Grid">
+                        <Setter Property="Visibility" Value="Visible"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding DashboardSection}" Value="home">
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding DashboardSection}" Value="analytics">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding DashboardSection}" Value="settings">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Grid.Style>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="1.1*"/>
                     <ColumnDefinition Width="1.55*"/>
@@ -177,266 +246,65 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-
-                    <UniformGrid x:Name="QuickMetricsGrid" Grid.Row="0" Columns="4" Rows="2" Margin="0,0,0,14">
-                        <Border Style="{StaticResource MetricTile}" Margin="0,0,8,8">
-                            <StackPanel>
-                                <TextBlock Text="{Binding Loc[latency]}" Style="{StaticResource Caption}"/>
-                                <TextBlock Text="{Binding LatencyLabel}" Style="{StaticResource StatMed}"/>
-                            </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource MetricTile}" Margin="2,0,6,8">
-                            <StackPanel>
-                                <TextBlock Text="{Binding Loc[download]}" Style="{StaticResource Caption}"/>
-                                <TextBlock Text="{Binding SpeedDown}" Style="{StaticResource StatMed}"/>
-                            </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource MetricTile}" Margin="4,0,4,8">
-                            <StackPanel>
-                                <TextBlock Text="{Binding Loc[upload]}" Style="{StaticResource Caption}"/>
-                                <TextBlock Text="{Binding SpeedUp}" Style="{StaticResource StatMed}"/>
-                            </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource MetricTile}" Margin="6,0,0,8">
-                            <StackPanel>
-                                <TextBlock Text="{Binding Loc[total_traffic]}" Style="{StaticResource Caption}"/>
-                                <TextBlock Text="{Binding TotalTrafficLabel}" Style="{StaticResource StatMed}"/>
-                            </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource MetricTile}" Margin="0,4,8,0">
-                            <StackPanel>
-                                <TextBlock Text="{Binding Loc[success_rate]}" Style="{StaticResource Caption}"/>
-                                <TextBlock Text="{Binding SuccessRateLabel}" Style="{StaticResource StatMed}"/>
-                            </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource MetricTile}" Margin="2,4,6,0">
-                            <StackPanel>
-                                <TextBlock Text="{Binding Loc[window_errors]}" Style="{StaticResource Caption}"/>
-                                <TextBlock Text="{Binding WindowErrorsLabel}" Style="{StaticResource StatMed}"/>
-                            </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource MetricTile}" Margin="4,4,4,0">
-                            <StackPanel>
-                                <TextBlock Text="{Binding Loc[active_endpoints]}" Style="{StaticResource Caption}"/>
-                                <TextBlock Text="{Binding EndpointLabel}" Style="{StaticResource StatMed}"/>
-                            </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource MetricTile}" Margin="6,4,0,0">
-                            <StackPanel>
-                                <TextBlock Text="{Binding Loc[peak_connections]}" Style="{StaticResource Caption}"/>
-                                <TextBlock Text="{Binding PeakConnectionsLabel}" Style="{StaticResource StatMed}"/>
-                            </StackPanel>
-                        </Border>
-                    </UniformGrid>
-
                     <Border Grid.Row="1" Style="{StaticResource Panel}" Padding="12">
-                        <TabControl Background="Transparent" BorderThickness="0">
-                            <TabItem Header="Overview" ToolTip="Live connection health, speed, and recent quality signals.">
-                                <Grid Margin="8">
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="*"/>
-                                    </Grid.RowDefinitions>
-                                    <TextBlock Text="{Binding Diagnostics}" TextWrapping="Wrap"/>
-                                    <UniformGrid Grid.Row="1" Columns="2" Margin="0,12,0,0">
-                                        <Border Style="{StaticResource MetricTile}" Margin="0,0,8,8">
-                                            <StackPanel>
-                                                <TextBlock Text="Endpoint Health" Style="{StaticResource Caption}"/>
-                                                <TextBlock Text="{Binding EndpointLabel}" Style="{StaticResource StatMed}"/>
-                                            </StackPanel>
-                                        </Border>
-                                        <Border Style="{StaticResource MetricTile}" Margin="8,0,0,8">
-                                            <StackPanel>
-                                                <TextBlock Text="Active Relay" Style="{StaticResource Caption}"/>
-                                                <TextBlock Text="{Binding ActiveEndpointLabel}" FontFamily="Cascadia Mono, Consolas"/>
-                                            </StackPanel>
-                                        </Border>
-                                        <Border Style="{StaticResource MetricTile}" Margin="0,0,8,0">
-                                            <StackPanel>
-                                                <TextBlock Text="Requests / sec" Style="{StaticResource Caption}"/>
-                                                <TextBlock Text="{Binding RequestsPerSecLabel}" Style="{StaticResource StatMed}"/>
-                                            </StackPanel>
-                                        </Border>
-                                        <Border Style="{StaticResource MetricTile}" Margin="8,0,0,0">
-                                            <StackPanel>
-                                                <TextBlock Text="Window Success" Style="{StaticResource Caption}"/>
-                                                <TextBlock Text="{Binding WindowSuccessRateLabel}" Style="{StaticResource StatMed}"/>
-                                            </StackPanel>
-                                        </Border>
-                                    </UniformGrid>
-                                    <Border Grid.Row="2" Style="{StaticResource MetricTile}" Margin="0,12,0,0" Padding="12">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{Binding Loc[activity]}" FontWeight="SemiBold"/>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                    <Button Content="{Binding Loc[copy]}" Style="{StaticResource GhostButton}"
+                                            Padding="8,3" Margin="0,0,4,0" Command="{Binding CopyLogsCmd}"/>
+                                    <Button Content="{Binding Loc[clear]}" Style="{StaticResource GhostButton}"
+                                            Padding="8,3" Command="{Binding ClearLogsCmd}"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <ListBox x:Name="LogList" Grid.Row="1"
+                                     ItemsSource="{Binding LogsView}"
+                                     Background="Transparent"
+                                     BorderThickness="0"
+                                     Margin="0,12,0,0"
+                                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                     VirtualizingStackPanel.IsVirtualizing="True"
+                                     VirtualizingStackPanel.VirtualizationMode="Recycling"
+                                     ScrollViewer.ScrollChanged="LogList_ScrollChanged">
+                                <ListBox.ItemContainerStyle>
+                                    <Style TargetType="ListBoxItem">
+                                        <Setter Property="Background" Value="Transparent"/>
+                                        <Setter Property="BorderThickness" Value="0"/>
+                                        <Setter Property="Padding" Value="0,3"/>
+                                        <Setter Property="Focusable" Value="False"/>
+                                    </Style>
+                                </ListBox.ItemContainerStyle>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate DataType="{x:Type m:LogEntry}">
                                         <Grid>
                                             <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="20"/>
-                                                <ColumnDefinition Width="*"/>
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel>
-                                                <TextBlock Text="Throughput Trend" Style="{StaticResource Caption}"/>
-                                                <TextBlock Text="{Binding ThroughputTrendLabel}" FontFamily="Cascadia Mono, Consolas" TextTrimming="CharacterEllipsis"/>
-                                            </StackPanel>
-                                            <StackPanel Grid.Column="2">
-                                                <TextBlock Text="Latency Trend" Style="{StaticResource Caption}"/>
-                                                <TextBlock Text="{Binding LatencyTrendLabel}" FontFamily="Cascadia Mono, Consolas" TextTrimming="CharacterEllipsis"/>
-                                            </StackPanel>
-                                        </Grid>
-                                    </Border>
-                                </Grid>
-                            </TabItem>
-
-                            <TabItem x:Name="RelaysTab" Header="Relays" ToolTip="Relay pool visibility and per-relay performance.">
-                                <Grid Margin="8">
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="*"/>
-                                    </Grid.RowDefinitions>
-                                    <Border Style="{StaticResource MetricTile}" Padding="12">
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="54"/>
+                                                <ColumnDefinition Width="58"/>
                                                 <ColumnDefinition Width="*"/>
                                             </Grid.ColumnDefinitions>
-                                            <StackPanel>
-                                                <TextBlock Text="Configured IDs" Style="{StaticResource Caption}"/>
-                                                <TextBlock Text="{Binding ConfiguredRelaysCountLabel}" Style="{StaticResource StatMed}"/>
-                                            </StackPanel>
-                                            <StackPanel Grid.Column="1">
-                                                <TextBlock Text="Healthy Endpoints" Style="{StaticResource Caption}"/>
-                                                <TextBlock Text="{Binding EndpointLabel}" Style="{StaticResource StatMed}"/>
-                                            </StackPanel>
-                                            <StackPanel Grid.Column="2">
-                                                <TextBlock Text="Routing" Style="{StaticResource Caption}"/>
-                                                <TextBlock Text="{Binding RelayRoutingLabel}" FontWeight="SemiBold"/>
-                                            </StackPanel>
+                                            <TextBlock Text="{Binding Time, StringFormat=HH:mm:ss}"
+                                                       Foreground="{StaticResource FgDimBrush}"
+                                                       FontFamily="Cascadia Mono, Consolas" FontSize="11"/>
+                                            <Border Grid.Column="1" Style="{StaticResource LogBadge}">
+                                                <TextBlock Text="{Binding LevelShort}" FontSize="10"
+                                                           FontWeight="SemiBold" HorizontalAlignment="Center"/>
+                                            </Border>
+                                            <TextBlock Grid.Column="2" Text="{Binding Message}"
+                                                       TextTrimming="CharacterEllipsis" Margin="8,0,0,0"/>
                                         </Grid>
-                                    </Border>
-                                    <TextBlock Grid.Row="1" Margin="0,12,0,8" Text="Configured Relay IDs" Style="{StaticResource Caption}"/>
-                                    <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
-                                        <Button Content="Export Relay Status"
-                                                Style="{StaticResource GhostButton}"
-                                                Command="{Binding ExportRelayStatusCmd}"
-                                                ToolTip="Export full relay table and routing status as JSON."
-                                                Padding="10,6"/>
-                                    </StackPanel>
-                                    <Grid Grid.Row="3">
-                                        <Grid.RowDefinitions>
-                                            <RowDefinition Height="110"/>
-                                            <RowDefinition Height="10"/>
-                                            <RowDefinition Height="*"/>
-                                        </Grid.RowDefinitions>
-                                        <Border Grid.Row="0" Style="{StaticResource MetricTile}" Padding="12">
-                                            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                                <TextBlock Text="{Binding ConfiguredRelaysPreview}" FontFamily="Cascadia Mono, Consolas" TextWrapping="Wrap"/>
-                                            </ScrollViewer>
-                                        </Border>
-                                        <Border Grid.Row="2" Style="{StaticResource MetricTile}" Padding="8">
-                                            <ListView ItemsSource="{Binding RelayDetails}" Background="Transparent" BorderThickness="0">
-                                                <ListView.View>
-                                                    <GridView>
-                                                        <GridViewColumn Header="Relay" Width="120" DisplayMemberBinding="{Binding Id}"/>
-                                                        <GridViewColumn Header="OK" Width="55" DisplayMemberBinding="{Binding Ok}"/>
-                                                        <GridViewColumn Header="Err" Width="55" DisplayMemberBinding="{Binding Err}"/>
-                                                        <GridViewColumn Header="Latency" Width="80" DisplayMemberBinding="{Binding LatencyMs, StringFormat={}{0:0} ms}"/>
-                                                        <GridViewColumn Header="Uses" Width="60" DisplayMemberBinding="{Binding Uses}"/>
-                                                        <GridViewColumn Header="Recent Fail" Width="90" DisplayMemberBinding="{Binding RecentFailures}"/>
-                                                        <GridViewColumn Header="Parked" Width="90" DisplayMemberBinding="{Binding ParkedForS, StringFormat={}{0}s}"/>
-                                                    </GridView>
-                                                </ListView.View>
-                                            </ListView>
-                                        </Border>
-                                    </Grid>
-                                </Grid>
-                            </TabItem>
-
-                            <TabItem x:Name="SoftwareTab" Header="Software" ToolTip="App version and file locations used by this installation.">
-                                <Grid Margin="8">
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="*"/>
-                                    </Grid.RowDefinitions>
-                                    <TextBlock Text="Application Version" Style="{StaticResource Caption}"/>
-                                    <TextBlock Grid.Row="1" Text="{Binding AppVersionLabel}" Margin="0,2,0,10"/>
-                                    <TextBlock Grid.Row="2" Text="Config Path" Style="{StaticResource Caption}"/>
-                                    <TextBlock Grid.Row="3" Text="{Binding ConfigPathLabel}" FontFamily="Cascadia Mono, Consolas" TextWrapping="Wrap" Margin="0,2,0,10"/>
-                                    <TextBlock Grid.Row="4" Text="Core Path" Style="{StaticResource Caption}"/>
-                                    <TextBlock Grid.Row="5" Text="{Binding CorePathLabel}" FontFamily="Cascadia Mono, Consolas" TextWrapping="Wrap" Margin="0,2,0,10"/>
-                                    <TextBlock Grid.Row="6" Text="Data Path" Style="{StaticResource Caption}"/>
-                                    <TextBlock Grid.Row="7" Text="{Binding DataPathLabel}" FontFamily="Cascadia Mono, Consolas" TextWrapping="Wrap"/>
-                                </Grid>
-                            </TabItem>
-
-                            <TabItem Header="Activity" ToolTip="Runtime logs for troubleshooting and support.">
-                                <Grid Margin="8">
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="*"/>
-                                    </Grid.RowDefinitions>
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <TextBlock Text="{Binding Loc[activity]}" FontWeight="SemiBold"/>
-                                        <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                            <Button Content="{Binding Loc[copy]}" Style="{StaticResource GhostButton}"
-                                                    Padding="8,3" Margin="0,0,4,0" Command="{Binding CopyLogsCmd}"/>
-                                            <Button Content="{Binding Loc[clear]}" Style="{StaticResource GhostButton}"
-                                                    Padding="8,3" Command="{Binding ClearLogsCmd}"/>
-                                        </StackPanel>
-                                    </Grid>
-
-                                    <ListBox x:Name="LogList" Grid.Row="1"
-                                             ItemsSource="{Binding LogsView}"
-                                             Background="Transparent"
-                                             BorderThickness="0"
-                                             Margin="0,12,0,0"
-                                             ScrollViewer.VerticalScrollBarVisibility="Auto"
-                                             VirtualizingStackPanel.IsVirtualizing="True"
-                                             VirtualizingStackPanel.VirtualizationMode="Recycling"
-                                             ScrollViewer.ScrollChanged="LogList_ScrollChanged">
-                                        <ListBox.ItemContainerStyle>
-                                            <Style TargetType="ListBoxItem">
-                                                <Setter Property="Background" Value="Transparent"/>
-                                                <Setter Property="BorderThickness" Value="0"/>
-                                                <Setter Property="Padding" Value="0,3"/>
-                                                <Setter Property="Focusable" Value="False"/>
-                                            </Style>
-                                        </ListBox.ItemContainerStyle>
-                                        <ListBox.ItemTemplate>
-                                            <DataTemplate DataType="{x:Type m:LogEntry}">
-                                                <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="54"/>
-                                                        <ColumnDefinition Width="58"/>
-                                                        <ColumnDefinition Width="*"/>
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Text="{Binding Time, StringFormat=HH:mm:ss}"
-                                                               Foreground="{StaticResource FgDimBrush}"
-                                                               FontFamily="Cascadia Mono, Consolas" FontSize="11"/>
-                                                    <Border Grid.Column="1" Style="{StaticResource LogBadge}">
-                                                        <TextBlock Text="{Binding LevelShort}" FontSize="10"
-                                                                   FontWeight="SemiBold" HorizontalAlignment="Center"/>
-                                                    </Border>
-                                                    <TextBlock Grid.Column="2" Text="{Binding Message}"
-                                                               TextTrimming="CharacterEllipsis" Margin="8,0,0,0"/>
-                                                </Grid>
-                                            </DataTemplate>
-                                        </ListBox.ItemTemplate>
-                                    </ListBox>
-                                </Grid>
-                            </TabItem>
-                        </TabControl>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Grid>
                     </Border>
                 </Grid>
 
@@ -465,11 +333,34 @@
             <Border Grid.Row="2" Height="0"/>
         </Grid>
 
-        <Grid Background="#CC06100C"
-              Visibility="{Binding SettingsOpen, Converter={StaticResource BoolToVisible}}">
+        <Grid Background="Transparent" Margin="0,84,0,0">
+            <Grid.Style>
+                <Style TargetType="Grid">
+                    <Setter Property="Visibility" Value="Collapsed"/>
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding DashboardSection}" Value="analytics">
+                            <Setter Property="Visibility" Value="Visible"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Grid.Style>
+            <views:AnalyticsPanel Margin="18,88,18,18"/>
+        </Grid>
+
+        <Grid Background="Transparent" Margin="0,84,0,0">
+            <Grid.Style>
+                <Style TargetType="Grid">
+                    <Setter Property="Visibility" Value="Collapsed"/>
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding DashboardSection}" Value="settings">
+                            <Setter Property="Visibility" Value="Visible"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Grid.Style>
             <Border Style="{StaticResource Panel}" Padding="22"
-                    Width="620" MaxHeight="620"
-                    HorizontalAlignment="Center" VerticalAlignment="Center">
+                    Margin="18,88,18,18"
+                    HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -500,13 +391,16 @@
                                     <DataTemplate>
                                         <Grid Margin="0,2">
                                             <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="26"/>
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="36"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBox Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}"
+                                            <CheckBox IsChecked="{Binding IsEnabled}" VerticalAlignment="Center"
+                                                      ToolTip="Enable or disable this relay ID without removing it."/>
+                                            <TextBox Grid.Column="1" Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}"
                                                      FontFamily="Cascadia Mono, Consolas"
                                                      ToolTip="Paste one Deployment ID per row."/>
-                                            <Button Grid.Column="1" Content="-"
+                                            <Button Grid.Column="2" Content="-"
                                                     Style="{StaticResource GhostButton}"
                                                     Padding="0" Width="30" Height="30" Margin="6,0,0,0"
                                                     Command="{Binding DataContext.RemoveDeploymentCmd,
@@ -537,6 +431,7 @@
                                     <TextBlock Text="Strategy" Style="{StaticResource SettingsLabel}"/>
                                     <ComboBox SelectedValue="{Binding MultiIdStrategy}" SelectedValuePath="Content">
                                         <ComboBoxItem Content="balanced"/>
+                                        <ComboBoxItem Content="fair_spread"/>
                                         <ComboBoxItem Content="round_robin"/>
                                         <ComboBoxItem Content="least_used"/>
                                     </ComboBox>
@@ -562,6 +457,17 @@
                             </Grid>
                             <TextBlock Text="Balanced is recommended. Lower fail threshold reacts faster; higher cooldown keeps bad relays parked longer."
                                        Style="{StaticResource Caption}" Margin="0,0,0,12" TextWrapping="Wrap"/>
+                            <TextBlock Text="{Binding EnabledRelaysCountLabel, StringFormat=Enabled relay IDs: {0}}"
+                                       Style="{StaticResource Caption}" Margin="0,0,0,12"/>
+
+                            <TextBlock Text="Direct Bypass Domains" Style="{StaticResource SettingsLabel}"/>
+                            <TextBox Text="{Binding DirectBypassDomainsText, UpdateSourceTrigger=PropertyChanged}"
+                                     Style="{StaticResource SettingsText}"
+                                     AcceptsReturn="True" Height="84"
+                                     VerticalScrollBarVisibility="Auto"
+                                     ToolTip="Domains to skip relay and connect directly (one per line), e.g. chatgpt.com"/>
+                            <TextBlock Text="Bypass is useful for Cloudflare challenge-heavy websites."
+                                       Style="{StaticResource Caption}" Margin="0,0,0,12"/>
 
                             <TextBlock Text="{Binding Loc[front_domain]}" Style="{StaticResource SettingsLabel}"/>
                             <TextBox Text="{Binding FrontDomain, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SettingsText}"
@@ -598,6 +504,38 @@
                             <Border BorderBrush="{StaticResource BorderBrush2}" BorderThickness="0,1,0,0"
                                     Margin="0,8,0,12"/>
                             <TextBlock Text="{Binding Loc[network_tuning]}" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                            <TextBlock Text="Response Cache" FontWeight="SemiBold" Margin="0,8,0,8"/>
+                            <Grid Margin="0,0,0,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="220"/>
+                                    <ColumnDefinition Width="10"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="10"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <CheckBox Content="Enable cache" IsChecked="{Binding CacheEnabled}" VerticalAlignment="Center"/>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Text="Cache size (MB)" Style="{StaticResource SettingsLabel}"/>
+                                    <TextBox Text="{Binding CacheMaxMb, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SettingsText}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="4">
+                                    <TextBlock Text="Default TTL (sec)" Style="{StaticResource SettingsLabel}"/>
+                                    <TextBox Text="{Binding CacheDefaultTtlS, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SettingsText}"/>
+                                </StackPanel>
+                            </Grid>
+                            <Grid Margin="0,0,0,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="220"/>
+                                    <ColumnDefinition Width="10"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="Serve stale on error (sec)" Style="{StaticResource SettingsLabel}"/>
+                                    <TextBox Text="{Binding CacheStaleIfErrorS, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SettingsText}"/>
+                                </StackPanel>
+                                <TextBlock Grid.Column="2" Text="For best hit rate, keep cache enabled and use 300-1200s TTL for static-heavy browsing."
+                                           VerticalAlignment="Center" TextWrapping="Wrap" Style="{StaticResource Caption}"/>
+                            </Grid>
 
                             <Grid Margin="0,0,0,10">
                                 <Grid.ColumnDefinitions>
@@ -648,9 +586,13 @@
                         </StackPanel>
                     </ScrollViewer>
 
-                    <Button Grid.Row="2" Content="{Binding Loc[done]}" Style="{StaticResource PrimaryButton}"
-                            Command="{Binding CloseSettingsCmd}" Padding="22,8"
-                            HorizontalAlignment="Right" Margin="0,14,0,0"/>
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+                        <Button Content="Back to Home" Style="{StaticResource GhostButton}"
+                                Command="{Binding SetDashboardSectionCmd}" CommandParameter="home"
+                                Padding="16,8" Margin="0,0,8,0"/>
+                        <Button Content="{Binding Loc[done]}" Style="{StaticResource PrimaryButton}"
+                                Command="{Binding CloseSettingsCmd}" Padding="22,8"/>
+                    </StackPanel>
                 </Grid>
             </Border>
         </Grid>
