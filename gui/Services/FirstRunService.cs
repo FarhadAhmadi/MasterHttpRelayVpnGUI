@@ -1,5 +1,4 @@
 using System;
-using System.Security.Cryptography;
 using System.Threading.Tasks;
 using MasterRelayVPN.Models;
 
@@ -75,17 +74,27 @@ public class FirstRunService
 
         cfg.EnableHttp2 = false;
         if (cfg.ChunkSize <= 0)    cfg.ChunkSize = 131072;
-        if (cfg.MaxParallel <= 0)  cfg.MaxParallel = 4;
+        if (cfg.MaxParallel <= 0)  cfg.MaxParallel = 2;
         if (cfg.FragmentSize <= 0) cfg.FragmentSize = 16384;
+        if (cfg.MultiIdFailThreshold <= 0) cfg.MultiIdFailThreshold = 2;
+        if (cfg.MultiIdCooldownSeconds <= 0) cfg.MultiIdCooldownSeconds = 120;
+        if (cfg.MultiIdMaxConsecutive <= 0) cfg.MultiIdMaxConsecutive = 2;
+        if (string.IsNullOrWhiteSpace(cfg.MultiIdStrategy)) cfg.MultiIdStrategy = "fair_spread";
+        if (cfg.CacheDefaultTtlS <= 0) cfg.CacheDefaultTtlS = 900;
+        if (cfg.CacheStaleIfErrorS < 0) cfg.CacheStaleIfErrorS = 180;
 
         if (string.IsNullOrWhiteSpace(cfg.LogLevel)) cfg.LogLevel = "INFO";
-        if (string.IsNullOrWhiteSpace(cfg.AuthKey)) cfg.AuthKey = NewKey();
-    }
+        if (string.IsNullOrWhiteSpace(cfg.AuthKey)) cfg.AuthKey = "CHANGE_ME_TO_A_STRONG_SECRET";
 
-    static string NewKey()
-    {
-        var b = new byte[24];
-        RandomNumberGenerator.Fill(b);
-        return Convert.ToBase64String(b).Replace("/", "_").Replace("+", "-").TrimEnd('=');
+        if (cfg.ScriptIds == null || cfg.ScriptIds.Count == 0)
+            cfg.ScriptIds = new System.Collections.Generic.List<string>(AppConfig.DefaultRelayIds);
+        if (string.IsNullOrWhiteSpace(cfg.ScriptId))
+            cfg.ScriptId = AppConfig.DefaultRelayIds[0];
+        if (cfg.RelayItems == null || cfg.RelayItems.Count == 0)
+        {
+            cfg.RelayItems = new System.Collections.Generic.List<RelayConfigItem>();
+            foreach (var id in AppConfig.DefaultRelayIds)
+                cfg.RelayItems.Add(new RelayConfigItem { Id = id, Enabled = true });
+        }
     }
 }

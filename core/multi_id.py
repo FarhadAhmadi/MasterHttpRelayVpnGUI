@@ -293,6 +293,7 @@ def install(cfg):
     DF._mrelay_multiid_patched = True
 
     orig_next = DF._next_script_id
+    orig_for_key = getattr(DF, "_script_id_for_key", None)
 
     def next_script_id_wrapped(self):
         if _dispatcher is None:
@@ -302,6 +303,19 @@ def install(cfg):
         return sid if sid else orig_next(self)
 
     DF._next_script_id = next_script_id_wrapped
+
+    if callable(orig_for_key):
+        def script_id_for_key_wrapped(self, key=None):
+            if _dispatcher is None:
+                return orig_for_key(self, key)
+            # Route all traffic through dispatcher strategy.
+            # Keeping host-sticky routing here caused single-endpoint hot spots.
+            sid = _dispatcher.next_id()
+            _request_sid.set(sid or "")
+            return sid if sid else orig_for_key(self, key)
+
+        DF._script_id_for_key = script_id_for_key_wrapped
+
     log.info("smart multi-ID routing enabled (%d endpoints, strategy=%s)",
              len(ids), cfg.get("multi_id_strategy", "balanced"))
 

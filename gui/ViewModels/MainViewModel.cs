@@ -680,12 +680,6 @@ public class MainViewModel : ObservableBase
             ResetRuntimeSession();
             UserMessage = "";
             AddLog(LogLevel.Info, "host", "Engine starting...");
-            if (!SysProxyOn)
-            {
-                ToggleSysProxy();
-                AddLog(LogLevel.Info, "sysproxy", "Auto-enabled system proxy because the tunnel started.");
-            }
-
             if (ActivePreset == "auto") _autoTuner.Start();
         }
         catch (Exception ex)
@@ -959,63 +953,95 @@ public class MainViewModel : ObservableBase
 
     void AnalyzeAndRecommend()
     {
-        var notes = new List<string>();
-        var apply = new List<Action>();
+        var findings = new List<string>();
         var relayNotes = new List<string>();
+        var apply = new List<Action>();
+        var appliedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void AddFix(string key, Action action)
+        {
+            if (appliedKeys.Add(key)) apply.Add(action);
+        }
+        void AddFinding(string sev, string area, string msg)
+            => findings.Add($"- [{sev}] {area}: {msg}");
+
+        var enabledRelayCount = _cfg.ScriptIds?.Count ?? 0;
         var unhealthyRelays = RelayDetails
-            .Where(r => r.Uses >= 5 && (r.SuccessRate < 0.70 || r.RecentFailures >= 3))
-            .OrderBy(r => r.SuccessRate)
+            .Where(r => (r.Window1M.Total >= 10 && r.Window1M.SuccessRate < 0.80) || r.RecentFailures >= 3 || r.Parked)
+            .OrderBy(r => r.Window1M.SuccessRate)
             .ThenByDescending(r => r.RecentFailures)
             .ToList();
+        var totalUses = RelayDetails.Sum(r => Math.Max(0, r.Uses));
+        var dominantRelay = totalUses > 0
+            ? RelayDetails.OrderByDescending(r => r.Uses).FirstOrDefault()
+            : null;
+        var dominanceRatio = (dominantRelay != null && totalUses > 0)
+            ? (double)dominantRelay.Uses / totalUses
+            : 0.0;
+        var windowErrorRate = _last.WindowRequests > 0
+            ? (double)_last.WindowErrors / _last.WindowRequests
+            : 0.0;
 
         if (!SysProxyOn)
+            AddFinding("INFO", "Routing", "System proxy is OFF (Firefox/manual proxy mode is expected).");
+        if (!CertInstallService.CertExists() || !CertInstallService.IsTrusted())
         {
-            notes.Add("- System proxy is OFF; apps may bypass the tunnel.");
-            apply.Add(ToggleSysProxy);
+            AddFinding("HIGH", "TLS", "CA certificate is missing/untrusted; HTTPS interception may fail.");
         }
-        if (_last.SuccessRate < 0.80)
+        if (enabledRelayCount < 3)
+            AddFinding("MED", "Capacity", "Fewer than 3 enabled relays; balancing headroom is limited.");
+
+        if (_last.SuccessRate < 0.85 || windowErrorRate > 0.18)
         {
-            notes.Add("- Success rate is below 80%; reduce fail threshold and increase cooldown.");
-            apply.Add(() => MultiIdFailThreshold = Math.Clamp(MultiIdFailThreshold, 1, 3));
-            apply.Add(() => MultiIdCooldownSeconds = Math.Max(MultiIdCooldownSeconds, 90));
-            apply.Add(() => MultiIdStrategy = "fair_spread");
+            AddFinding("HIGH", "Reliability",
+                $"Success {_last.SuccessRate * 100:0.#}% and window error rate {windowErrorRate * 100:0.#}% indicate instability.");
+            AddFix("fail_threshold", () => MultiIdFailThreshold = Math.Clamp(MultiIdFailThreshold, 1, 2));
+            AddFix("cooldown_up", () => MultiIdCooldownSeconds = Math.Max(MultiIdCooldownSeconds, 120));
+            AddFix("strategy_spread", () => MultiIdStrategy = "fair_spread");
         }
-        if ((_last.LatencyMs > 2200 || _probeLatencyMs > 2200) && MaxParallel > 3)
+
+        if ((_last.LatencyMs > 2200 || _probeLatencyMs > 2200) && MaxParallel > 2)
         {
-            notes.Add("- Latency is high; lower parallelism for better stability.");
-            apply.Add(() => MaxParallel = 3);
+            AddFinding("MED", "Latency", "High latency detected while parallelism is high.");
+            AddFix("max_parallel_2", () => MaxParallel = 2);
         }
-        if (_last.CacheHitRate < 0.35 && CacheEnabled)
+        if (_last.LatencyMs > 3500 && FragmentSize > 8192)
         {
-            notes.Add("- Cache hit rate is low; increase default TTL and keep relays enabled for reuse.");
-            apply.Add(() => CacheDefaultTtlS = Math.Max(CacheDefaultTtlS, 900));
-            apply.Add(() => CacheStaleIfErrorS = Math.Max(CacheStaleIfErrorS, 180));
+            AddFinding("MED", "Network", "Very high latency; smaller TLS fragment often improves hostile-network behavior.");
+            AddFix("fragment_8192", () => FragmentSize = 8192);
         }
+        if (_last.LatencyMs > 2500)
+            AddFinding("INFO", "Path quality", "Run a Google IP scan and switch to a lower-latency front IP if available.");
+
         if (!CacheEnabled)
         {
-            notes.Add("- Cache is disabled; enabling it usually improves throughput and latency.");
-            apply.Add(() => CacheEnabled = true);
+            AddFinding("MED", "Cache", "Cache is disabled; repeated requests cannot reuse responses.");
+            AddFix("cache_on", () => CacheEnabled = true);
         }
-        if ((_cfg.ScriptIds?.Count ?? 0) + (string.IsNullOrWhiteSpace(_cfg.ScriptId) ? 0 : 1) < 3)
-            notes.Add("- Fewer than 3 relays are configured; add more deployment IDs for better balancing.");
-        if (WindowErrorsLabel != "0")
-            notes.Add("- Recent window contains errors; favor stable routing and lower parallelism.");
+        else if (_last.CacheHitRate < 0.35)
+        {
+            AddFinding("LOW", "Cache", $"Cache hit rate is low ({CacheHitRateLabel}); TTL tuning may help.");
+            AddFix("cache_ttl", () => CacheDefaultTtlS = Math.Max(CacheDefaultTtlS, 900));
+            AddFix("cache_stale", () => CacheStaleIfErrorS = Math.Max(CacheStaleIfErrorS, 180));
+        }
 
-        foreach (var relay in unhealthyRelays.Take(3))
+        if (dominanceRatio > 0.70 && RelayDetails.Count >= 3)
+        {
+            AddFinding("MED", "Load-balance",
+                $"Relay {ShortRelayId(dominantRelay?.Id ?? "")} carries {dominanceRatio * 100:0.#}% of dispatcher uses.");
+            AddFix("max_consecutive", () => MultiIdMaxConsecutive = Math.Min(MultiIdMaxConsecutive, 2));
+            AddFix("strategy_fair", () => MultiIdStrategy = "fair_spread");
+        }
+
+        foreach (var relay in unhealthyRelays.Take(4))
         {
             relayNotes.Add(
-                $"- Relay {ShortRelayId(relay.Id)}: success {(relay.SuccessRate * 100):0.#}% | " +
-                $"recent fails {relay.RecentFailures} | latency {(relay.LatencyMs > 0 ? relay.LatencyMs.ToString("0") : "--")} ms");
-        }
-        if (unhealthyRelays.Count > 0)
-        {
-            notes.Add("- Some relays are unhealthy. Keep them configured, but expect routing to deprioritize them.");
-            apply.Add(() => MultiIdFailThreshold = Math.Clamp(MultiIdFailThreshold, 1, 2));
-            apply.Add(() => MultiIdCooldownSeconds = Math.Max(MultiIdCooldownSeconds, 120));
-            apply.Add(() => MultiIdStrategy = "fair_spread");
+                $"- Relay {ShortRelayId(relay.Id)} | uses {relay.Uses} | " +
+                $"1m success {(relay.Window1M.SuccessRate * 100):0.#}% ({relay.Window1M.Ok}/{relay.Window1M.Total}) | " +
+                $"fails {relay.RecentFailures} | parked {(relay.Parked ? $"yes {relay.ParkedForS}s" : "no")} | " +
+                $"latency {(relay.LatencyMs > 0 ? relay.LatencyMs.ToString("0") : "--")} ms");
         }
 
-        if (notes.Count == 0)
+        if (findings.Count == 0)
         {
             MessageBox.Show(
                 "Current state looks healthy. No automatic changes are recommended right now.",
@@ -1026,10 +1052,15 @@ public class MainViewModel : ObservableBase
         }
 
         var msg = "System analysis summary:\n\n"
-            + string.Join("\n", notes)
-            + (relayNotes.Count > 0 ? "\n\nRelay health details:\n" + string.Join("\n", relayNotes) : "")
-            + $"\n\nCache: hit {CacheHitRateLabel}, effective {CacheEffectiveHitRateLabel}, stale hits {CacheStaleHitsLabel}"
-            + "\n\nMode: Apply tuning only (no relay removal)."
+            + string.Join("\n", findings)
+            + (relayNotes.Count > 0 ? "\n\nRelay risk details:\n" + string.Join("\n", relayNotes) : "")
+            + "\n\nObserved metrics:"
+            + $"\n- Success rate: {SuccessRateLabel}"
+            + $"\n- Window success: {WindowSuccessRateLabel} ({WindowRequestsLabel} req, {WindowErrorsLabel} errors)"
+            + $"\n- Latency: {LatencyLabel}"
+            + $"\n- Endpoint health: {EndpointLabel}"
+            + $"\n- Cache: hit {CacheHitRateLabel}, effective {CacheEffectiveHitRateLabel}, stale {CacheStaleHitsLabel}"
+            + "\n\nMode: Apply safe tuning only (no relay removal)."
             + "\n\nApply safe automatic recommendations now?";
         var choice = MessageBox.Show(msg, "Analyzer", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (choice != MessageBoxResult.Yes) return;
@@ -1173,6 +1204,15 @@ public class MainViewModel : ObservableBase
             },
         }).ToList();
 
+        var totalRelayOk = RelayDetails.Sum(r => r.Ok);
+        var totalRelayErr = RelayDetails.Sum(r => r.Err);
+        var totalRelayReq = totalRelayOk + totalRelayErr;
+        var totalUses = RelayDetails.Sum(r => Math.Max(0, r.Uses));
+        var parkedCount = RelayDetails.Count(r => r.Parked);
+        var dominant = totalUses > 0
+            ? RelayDetails.OrderByDescending(r => r.Uses).FirstOrDefault()
+            : null;
+        var dominanceRatio = dominant != null && totalUses > 0 ? (double)dominant.Uses / totalUses : 0.0;
         var payload = new
         {
             generated_at = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
@@ -1201,6 +1241,20 @@ public class MainViewModel : ObservableBase
                 window_errors = WindowErrorsLabel,
                 window_success_rate = WindowSuccessRateLabel,
             },
+            analysis = new
+            {
+                relay_total_ok = totalRelayOk,
+                relay_total_err = totalRelayErr,
+                relay_total_requests = totalRelayReq,
+                relay_error_rate = totalRelayReq > 0 ? Math.Round((double)totalRelayErr / totalRelayReq, 4) : 0.0,
+                parked_relays = parkedCount,
+                parked_ratio = RelayDetails.Count > 0 ? Math.Round((double)parkedCount / RelayDetails.Count, 4) : 0.0,
+                dominant_relay = dominant != null ? ShortRelayId(dominant.Id) : "--",
+                dominant_use_ratio = Math.Round(dominanceRatio, 4),
+                routing_balance = dominanceRatio > 0.70 ? "imbalanced" : (dominanceRatio > 0.50 ? "mixed" : "balanced"),
+                health_grade = _last.SuccessRate >= 0.95 ? "A" : (_last.SuccessRate >= 0.85 ? "B" : (_last.SuccessRate >= 0.70 ? "C" : "D")),
+            },
+            insights = BuildQuickInsights(),
             relays = rows,
             recent_relay_logs = Logs
                 .Where(x => x.Source.Contains("multi", StringComparison.OrdinalIgnoreCase) || x.Source.Contains("relay", StringComparison.OrdinalIgnoreCase))
@@ -1218,6 +1272,15 @@ public class MainViewModel : ObservableBase
 
     string BuildSupportSummary()
     {
+        var topFail = RelayDetails
+            .OrderByDescending(r => r.RecentFailures)
+            .ThenBy(r => r.Window1M.SuccessRate)
+            .Take(3)
+            .ToList();
+        var topHot = RelayDetails
+            .OrderByDescending(r => r.Uses)
+            .Take(2)
+            .ToList();
         var sb = new StringBuilder();
         sb.AppendLine($"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine($"App: {AppVersionLabel}");
@@ -1228,10 +1291,27 @@ public class MainViewModel : ObservableBase
         sb.AppendLine($"Requests: {Requests}, RPS: {RequestsPerSecLabel}");
         sb.AppendLine($"Traffic: {TotalTrafficLabel}, Uptime: {Uptime}");
         sb.AppendLine($"Proxy: {(SysProxyOn ? "On" : "Off")}");
+        if (!SysProxyOn && _core.IsRunning && _last.WindowRequests > 0)
+            sb.AppendLine("Proxy mode: manual/browser-scoped (system-wide proxy intentionally disabled).");
         sb.AppendLine($"Strategy: {MultiIdStrategy}, MaxConsecutive: {MultiIdMaxConsecutive}");
         sb.AppendLine($"Relays enabled/configured: {EnabledRelaysCountLabel}/{ConfiguredRelaysCountLabel}");
         sb.AppendLine($"Cache: {(CacheEnabled ? "Enabled" : "Disabled")} | hit {CacheHitRateLabel} | effective {CacheEffectiveHitRateLabel} | stale hits {CacheStaleHitsLabel} | size {CacheSizeLabel}");
         sb.AppendLine($"Bypass domains: {(_cfg.DirectBypassDomains?.Count ?? 0)}");
+        sb.AppendLine($"Runtime health grade: {(_last.SuccessRate >= 0.95 ? "A" : (_last.SuccessRate >= 0.85 ? "B" : (_last.SuccessRate >= 0.70 ? "C" : "D")))}");
+        sb.AppendLine($"Window: success {WindowSuccessRateLabel}, requests {WindowRequestsLabel}, errors {WindowErrorsLabel}");
+        sb.AppendLine($"Trend throughput: {ThroughputTrendLabel}");
+        sb.AppendLine($"Trend latency: {LatencyTrendLabel}");
+        if (topHot.Count > 0)
+            sb.AppendLine("Top used relays: " + string.Join(", ", topHot.Select(r => $"{ShortRelayId(r.Id)} ({r.Uses} uses)")));
+        if (topFail.Count > 0)
+            sb.AppendLine("Relays to watch: " + string.Join(", ", topFail.Select(r =>
+                $"{ShortRelayId(r.Id)} ({r.RecentFailures} fails, 1m {(r.Window1M.SuccessRate * 100):0.#}%)")));
+        var insights = BuildQuickInsights();
+        if (insights.Count > 0)
+        {
+            sb.AppendLine("Insights:");
+            foreach (var i in insights) sb.AppendLine($"  - {i}");
+        }
         if (_sessionStartedAt.HasValue)
         {
             sb.AppendLine($"Session started: {_sessionStartedAt:yyyy-MM-dd HH:mm:ss}");
@@ -1249,6 +1329,10 @@ public class MainViewModel : ObservableBase
 
     string BuildRuntimeSnapshotJson()
     {
+        var relaySpread = RelayDetails
+            .OrderByDescending(r => r.Uses)
+            .Select(r => new { id = ShortRelayId(r.Id), uses = r.Uses })
+            .ToList();
         var payload = new
         {
             generated_at = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
@@ -1278,6 +1362,9 @@ public class MainViewModel : ObservableBase
                 active_endpoint = ActiveEndpointLabel,
                 latency = LatencyLabel,
                 success_rate = SuccessRateLabel,
+                window_success_rate = WindowSuccessRateLabel,
+                window_requests = WindowRequestsLabel,
+                window_errors = WindowErrorsLabel,
             },
             session_rollup = new
             {
@@ -1304,6 +1391,13 @@ public class MainViewModel : ObservableBase
                 cache_default_ttl_s = CacheDefaultTtlS,
                 cache_stale_if_error_s = CacheStaleIfErrorS,
             },
+            analysis = new
+            {
+                insights = BuildQuickInsights(),
+                throughput_trend = ThroughputTrendLabel,
+                latency_trend = LatencyTrendLabel,
+                relay_spread = relaySpread,
+            },
             relays = RelayDetails.Select(r => new
             {
                 id = r.Id,
@@ -1324,6 +1418,42 @@ public class MainViewModel : ObservableBase
         {
             WriteIndented = true
         });
+    }
+
+    List<string> BuildQuickInsights()
+    {
+        var insights = new List<string>();
+        if (!SysProxyOn)
+        {
+            if (_core.IsRunning && _last.WindowRequests > 0)
+                insights.Add("Manual/browser-scoped proxy mode is active (system-wide proxy remains off).");
+            else
+                insights.Add("System proxy is disabled; apps outside browser/manual config may bypass tunnel.");
+        }
+        if (_last.SuccessRate < 0.85) insights.Add($"Global success rate is low ({SuccessRateLabel}); prioritize reliability tuning.");
+        if (_last.WindowRequests > 0 && _last.WindowErrors > 0)
+        {
+            var errRate = (double)_last.WindowErrors / _last.WindowRequests;
+            if (errRate > 0.15) insights.Add($"Recent error pressure is elevated ({errRate * 100:0.#}% errors in window).");
+        }
+        if (_last.LatencyMs > 2200 || _probeLatencyMs > 2200)
+            insights.Add($"Latency is high ({LatencyLabel}); reduce parallel load and verify front IP quality.");
+        if (_last.LatencyMs > 2500)
+            insights.Add("For best results, run Google IP scan and update `google_ip` to the fastest reachable candidate.");
+        if (!CacheEnabled) insights.Add("Cache is disabled; repeated content cannot be reused.");
+        else if (_last.CacheHitRate < 0.35) insights.Add($"Cache effectiveness is low (hit {CacheHitRateLabel}); consider longer TTL.");
+        var parked = RelayDetails.Count(r => r.Parked);
+        if (RelayDetails.Count > 0 && parked > 0)
+            insights.Add($"{parked}/{RelayDetails.Count} relays are currently parked.");
+        var totalUses = RelayDetails.Sum(r => Math.Max(0, r.Uses));
+        if (totalUses > 0)
+        {
+            var top = RelayDetails.OrderByDescending(r => r.Uses).First();
+            var dominance = (double)top.Uses / totalUses;
+            if (dominance > 0.70)
+                insights.Add($"Relay distribution is imbalanced; {ShortRelayId(top.Id)} handles {dominance * 100:0.#}% of uses.");
+        }
+        return insights;
     }
 
     void ResetRuntimeSession()

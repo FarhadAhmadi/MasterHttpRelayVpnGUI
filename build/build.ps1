@@ -109,7 +109,7 @@ Copy-Item (Join-Path $Root "build\MasterRelayCore.spec") $stage
 
 $required = @(
     "main_gui.py","ca_path.py","stats.py","log_filter.py","net_patches.py","gui_bridge.py",
-    "cert_installer.py","mitm.py","proxy_server.py","domain_fronter.py","h2_transport.py","ws.py",
+    "cert_installer.py","mitm.py","proxy_server.py","domain_fronter.py","h2_transport.py",
     "MasterRelayCore.spec"
 )
 foreach ($f in $required) {

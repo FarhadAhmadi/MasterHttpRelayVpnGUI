@@ -32,7 +32,7 @@ a = Analysis(
             # Local modules — explicit so PyInstaller can't miss them.
             "ca_path", "stats", "log_filter", "net_patches", "gui_bridge",
             "cert_installer", "mitm", "proxy_server", "domain_fronter",
-            "h2_transport", "ws",
+            "h2_transport", "google_ip_scanner", "lan_utils",
         ]
     ),
     hookspath=[],
