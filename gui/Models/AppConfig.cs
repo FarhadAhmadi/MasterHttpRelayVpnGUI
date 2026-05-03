@@ -79,6 +79,8 @@ public class AppConfig
     [JsonPropertyName("cache_max_mb")]    public int CacheMaxMb { get; set; } = 96;
     [JsonPropertyName("cache_default_ttl_s")] public int CacheDefaultTtlS { get; set; } = 900;
     [JsonPropertyName("cache_stale_if_error_s")] public int CacheStaleIfErrorS { get; set; } = 180;
+    [JsonPropertyName("relay_cb_threshold")] public int RelayCbThreshold { get; set; } = 3;
+    [JsonPropertyName("relay_cb_cooldown")] public int RelayCbCooldown { get; set; } = 20;
 
     // Multi-ID tuning
     [JsonPropertyName("multi_id_fail_threshold")]   public int MultiIdFailThreshold { get; set; } = 2;

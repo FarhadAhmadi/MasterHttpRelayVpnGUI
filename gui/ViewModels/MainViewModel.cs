@@ -5,6 +5,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -29,6 +30,7 @@ public class MainViewModel : ObservableBase
     readonly ConcurrentQueue<LogEntry> _pendingLogs = new();
     readonly Queue<double> _latencyTrend = new();
     readonly Queue<double> _throughputTrend = new();
+    readonly Dictionary<string, int> _hostErrorCounts = new(StringComparer.OrdinalIgnoreCase);
     bool _deploymentHandlersAttached;
     bool _suspendDeploymentPersist;
     ProxyToggleService.ProxyState? _previousProxyState;
@@ -131,7 +133,11 @@ public class MainViewModel : ObservableBase
         _healthMonitor.Start(
             shouldCheck: () => _core.IsRunning,
             endpoint: () => (ListenHost, ListenPort));
-        _clockTimer = new Timer(_ => OnUi(() => Raise(nameof(LastCheckLabel))),
+        _clockTimer = new Timer(_ => OnUi(() =>
+        {
+            Raise(nameof(LastCheckLabel));
+            Raise(nameof(SessionDurationLabel));
+        }),
             null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
         _logFlushTimer = new DispatcherTimer(
             TimeSpan.FromMilliseconds(100),
@@ -180,6 +186,7 @@ public class MainViewModel : ObservableBase
             nameof(EnableHttp2), nameof(EnableChunked), nameof(ChunkSize),
             nameof(MaxParallel), nameof(FragmentSize), nameof(ActivePreset),
             nameof(CacheEnabled), nameof(CacheMaxMb), nameof(CacheDefaultTtlS), nameof(CacheStaleIfErrorS),
+            nameof(RelayCbThreshold), nameof(RelayCbCooldown),
             nameof(MultiIdFailThreshold), nameof(MultiIdCooldownSeconds),
             nameof(MultiIdStrategy), nameof(MultiIdMaxConsecutive),
             nameof(DirectBypassDomainsText),
@@ -207,6 +214,8 @@ public class MainViewModel : ObservableBase
     public int    CacheMaxMb    { get => _cfg.CacheMaxMb;     set { _cfg.CacheMaxMb = value; Raise(); } }
     public int    CacheDefaultTtlS { get => _cfg.CacheDefaultTtlS; set { _cfg.CacheDefaultTtlS = value; Raise(); } }
     public int    CacheStaleIfErrorS { get => _cfg.CacheStaleIfErrorS; set { _cfg.CacheStaleIfErrorS = value; Raise(); } }
+    public int    RelayCbThreshold { get => _cfg.RelayCbThreshold; set { _cfg.RelayCbThreshold = value; Raise(); } }
+    public int    RelayCbCooldown { get => _cfg.RelayCbCooldown; set { _cfg.RelayCbCooldown = value; Raise(); } }
     public string ActivePreset  { get => _cfg.Preset; set { _cfg.Preset = value; Raise(); } }
     public int    MultiIdFailThreshold
     {
@@ -346,6 +355,19 @@ public class MainViewModel : ObservableBase
     public string WindowRequestsLabel => _last.WindowRequests.ToString();
     public string PeakConnectionsLabel => _last.PeakConnections.ToString();
     public string TotalTrafficLabel => Human.Bytes(_last.BytesUp + _last.BytesDown);
+    public string LiveBandwidthLabel => Human.PerSec(_last.SpeedDown + _last.SpeedUp);
+    public string SessionDurationLabel => _sessionStartedAt.HasValue
+        ? Human.Duration((long)Math.Max(0, (DateTime.Now - _sessionStartedAt.Value).TotalSeconds))
+        : "--";
+    public string SessionAvgLatencyLabel => _sessionStatsSamples > 0
+        ? $"{_sessionLatencySum / _sessionStatsSamples:0} ms"
+        : "--";
+    public string SessionAvgRpsLabel => _sessionStatsSamples > 0
+        ? $"{_sessionRpsSum / _sessionStatsSamples:0.00}/s"
+        : "--";
+    public string SessionAvgSuccessLabel => _sessionStatsSamples > 0
+        ? $"{(_sessionSuccessSum / _sessionStatsSamples) * 100:0}%"
+        : "--";
     public string CacheHitRateLabel => $"{Math.Clamp(_last.CacheHitRate, 0, 1) * 100:0}%";
     public string CacheEffectiveHitRateLabel => $"{Math.Clamp(_last.CacheEffectiveHitRate, 0, 1) * 100:0}%";
     public string CacheStaleHitsLabel => _last.CacheStaleHits.ToString();
@@ -353,6 +375,18 @@ public class MainViewModel : ObservableBase
     public string EndpointLabel => _last.Endpoints > 0
         ? $"{_last.EndpointsHealthy}/{_last.Endpoints}"
         : "--";
+    public string QuickHealthGradeLabel => _last.SuccessRate >= 0.95
+        ? "A"
+        : (_last.SuccessRate >= 0.85 ? "B" : (_last.SuccessRate >= 0.70 ? "C" : "D"));
+    public string TopFailingHostLabel
+    {
+        get
+        {
+            if (_hostErrorCounts.Count == 0) return "--";
+            var top = _hostErrorCounts.OrderByDescending(x => x.Value).First();
+            return $"{top.Key} ({top.Value})";
+        }
+    }
     public string ActiveEndpointLabel => string.IsNullOrWhiteSpace(_last.ActiveEndpoint)
         ? "--"
         : _last.ActiveEndpoint;
@@ -443,8 +477,12 @@ public class MainViewModel : ObservableBase
             nameof(LatencyLabel), nameof(SuccessRateLabel), nameof(RequestsPerSecLabel),
             nameof(WindowSuccessRateLabel), nameof(WindowErrorsLabel), nameof(WindowRequestsLabel),
             nameof(PeakConnectionsLabel), nameof(TotalTrafficLabel),
+            nameof(LiveBandwidthLabel), nameof(SessionDurationLabel),
+            nameof(SessionAvgLatencyLabel), nameof(SessionAvgRpsLabel),
+            nameof(SessionAvgSuccessLabel),
             nameof(CacheHitRateLabel), nameof(CacheEffectiveHitRateLabel), nameof(CacheStaleHitsLabel), nameof(CacheSizeLabel),
             nameof(EndpointLabel), nameof(ActiveEndpointLabel),
+            nameof(QuickHealthGradeLabel), nameof(TopFailingHostLabel),
             nameof(RelayRoutingLabel), nameof(ConfiguredRelaysCountLabel),
             nameof(EnabledRelaysCountLabel),
             nameof(ThroughputTrendLabel), nameof(LatencyTrendLabel),
@@ -744,6 +782,10 @@ public class MainViewModel : ObservableBase
         if (CacheDefaultTtlS > 86400) CacheDefaultTtlS = 86400;
         if (CacheStaleIfErrorS < 0) CacheStaleIfErrorS = 0;
         if (CacheStaleIfErrorS > 3600) CacheStaleIfErrorS = 3600;
+        if (RelayCbThreshold < 1) RelayCbThreshold = 1;
+        if (RelayCbThreshold > 10) RelayCbThreshold = 10;
+        if (RelayCbCooldown < 5) RelayCbCooldown = 5;
+        if (RelayCbCooldown > 180) RelayCbCooldown = 180;
         if (MultiIdFailThreshold < 1) MultiIdFailThreshold = 1;
         if (MultiIdFailThreshold > 20) MultiIdFailThreshold = 20;
         if (MultiIdCooldownSeconds < 5) MultiIdCooldownSeconds = 5;
@@ -987,6 +1029,16 @@ public class MainViewModel : ObservableBase
         {
             AddFinding("HIGH", "TLS", "CA certificate is missing/untrusted; HTTPS interception may fail.");
         }
+        if (!VerifySsl)
+        {
+            AddFinding("HIGH", "Security", "verify_ssl is OFF; enable it to avoid silent upstream TLS downgrade risks.");
+            AddFix("verify_ssl_on", () => VerifySsl = true);
+        }
+        if (!string.IsNullOrWhiteSpace(CustomSni) && !CustomSni.Equals("www.google.com", StringComparison.OrdinalIgnoreCase))
+        {
+            AddFinding("MED", "SNI", $"Custom SNI is set to '{CustomSni}', which can break some CDNs/apps.");
+            AddFix("custom_sni_clear", () => CustomSni = "");
+        }
         if (enabledRelayCount < 3)
             AddFinding("MED", "Capacity", "Fewer than 3 enabled relays; balancing headroom is limited.");
 
@@ -1003,6 +1055,11 @@ public class MainViewModel : ObservableBase
         {
             AddFinding("MED", "Latency", "High latency detected while parallelism is high.");
             AddFix("max_parallel_2", () => MaxParallel = 2);
+        }
+        if (_last.LatencyMs < 1200 && _last.SuccessRate > 0.96 && MaxParallel < 4)
+        {
+            AddFinding("LOW", "Throughput", "Network is healthy; a little more parallelism can improve page load speed.");
+            AddFix("max_parallel_4", () => MaxParallel = Math.Max(MaxParallel, 4));
         }
         if (_last.LatencyMs > 3500 && FragmentSize > 8192)
         {
@@ -1022,6 +1079,22 @@ public class MainViewModel : ObservableBase
             AddFinding("LOW", "Cache", $"Cache hit rate is low ({CacheHitRateLabel}); TTL tuning may help.");
             AddFix("cache_ttl", () => CacheDefaultTtlS = Math.Max(CacheDefaultTtlS, 900));
             AddFix("cache_stale", () => CacheStaleIfErrorS = Math.Max(CacheStaleIfErrorS, 180));
+        }
+        if (CacheEnabled && CacheMaxMb < 96)
+        {
+            AddFinding("LOW", "Cache", "Cache size is small; increasing cache budget can improve repeat-load performance.");
+            AddFix("cache_size_96", () => CacheMaxMb = Math.Max(CacheMaxMb, 96));
+        }
+
+        if (RelayCbThreshold > 3)
+        {
+            AddFinding("LOW", "Circuit-breaker", "Per-host relay breaker reacts slowly; reducing threshold cuts repeated timeout stalls.");
+            AddFix("relay_cb_threshold", () => RelayCbThreshold = 3);
+        }
+        if (RelayCbCooldown < 20)
+        {
+            AddFinding("LOW", "Circuit-breaker", "Cooldown is short; slightly longer cooldown reduces immediate re-fail loops.");
+            AddFix("relay_cb_cooldown", () => RelayCbCooldown = 20);
         }
 
         if (dominanceRatio > 0.70 && RelayDetails.Count >= 3)
@@ -1091,6 +1164,33 @@ public class MainViewModel : ObservableBase
     {
         Logs.Add(e);
         while (Logs.Count > MaxLogLines) Logs.RemoveAt(0);
+        TrackFailingHostFromLog(e);
+        Raise(nameof(TopFailingHostLabel));
+    }
+
+    static readonly Regex _urlInParensRx = new(@"\((https?://[^)\s]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    static readonly Regex _respHostRx = new(@"RESP\s+[^\s]*\s+([a-z0-9.-]+\.[a-z]{2,})\s+status=", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    void TrackFailingHostFromLog(LogEntry e)
+    {
+        if (e.Level != LogLevel.Error && e.Level != LogLevel.Warning) return;
+        var msg = e.Message ?? "";
+
+        string? host = null;
+
+        var m = _urlInParensRx.Match(msg);
+        if (m.Success && Uri.TryCreate(m.Groups[1].Value, UriKind.Absolute, out var uri))
+            host = uri.Host;
+
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            var rm = _respHostRx.Match(msg);
+            if (rm.Success) host = rm.Groups[1].Value;
+        }
+
+        if (string.IsNullOrWhiteSpace(host)) return;
+        host = host.Trim().ToLowerInvariant();
+        _hostErrorCounts[host] = _hostErrorCounts.TryGetValue(host, out var n) ? n + 1 : 1;
     }
 
     void RefreshCommands()
@@ -1390,6 +1490,8 @@ public class MainViewModel : ObservableBase
                 cache_max_mb = CacheMaxMb,
                 cache_default_ttl_s = CacheDefaultTtlS,
                 cache_stale_if_error_s = CacheStaleIfErrorS,
+                relay_cb_threshold = RelayCbThreshold,
+                relay_cb_cooldown = RelayCbCooldown,
             },
             analysis = new
             {
@@ -1465,6 +1567,12 @@ public class MainViewModel : ObservableBase
         _sessionRpsSum = 0;
         _sessionRpsMax = 0;
         _sessionSuccessSum = 0;
+        _hostErrorCounts.Clear();
+        Raise(nameof(SessionDurationLabel));
+        Raise(nameof(SessionAvgLatencyLabel));
+        Raise(nameof(SessionAvgRpsLabel));
+        Raise(nameof(SessionAvgSuccessLabel));
+        Raise(nameof(TopFailingHostLabel));
     }
 
     void UpdateSessionMetrics(StatsSnapshot s)

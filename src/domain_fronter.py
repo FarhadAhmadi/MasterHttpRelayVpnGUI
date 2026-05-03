@@ -2427,8 +2427,11 @@ class DomainFronter:
                        500: "Internal Server Error"}.get(status, "OK")
         result = f"HTTP/1.1 {status} {status_text}\r\n"
 
+        # Keep Content-Encoding as-is. Apps Script returns the upstream bytes
+        # unchanged, so stripping this header breaks compressed CSS/JS/fonts
+        # on sites like Instagram.
         skip = {"transfer-encoding", "connection", "keep-alive",
-                "content-length", "content-encoding"}
+                "content-length"}
         for k, v in resp_headers.items():
             if k.lower() in skip:
                 continue

@@ -91,27 +91,56 @@ class ResponseCache:
     """Simple LRU response cache — avoids repeated relay calls."""
 
     def __init__(self, max_mb: int = 50):
+        # key -> (raw_response, expires_at)
         self._store: dict[str, tuple[bytes, float]] = {}
         self._size = 0
         self._max = max_mb * 1024 * 1024
         self.hits = 0
         self.misses = 0
+        self._last_prune = 0.0
 
-    def get(self, url: str) -> bytes | None:
-        entry = self._store.get(url)
+    @staticmethod
+    def _normalize_header_value(headers: dict | None, name: str) -> str:
+        if not headers:
+            return ""
+        for k, v in headers.items():
+            if k.lower() == name:
+                return str(v).strip().lower()
+        return ""
+
+    @classmethod
+    def build_key(cls, url: str, headers: dict | None) -> str:
+        # Include variant-driving headers so cached objects don't get mixed
+        # across encodings/content negotiation (e.g. br vs gzip, avif vs webp).
+        accept = cls._normalize_header_value(headers, "accept")
+        accept_encoding = cls._normalize_header_value(headers, "accept-encoding")
+        accept_language = cls._normalize_header_value(headers, "accept-language")
+        return f"{url}\nA:{accept}\nAE:{accept_encoding}\nAL:{accept_language}"
+
+    def get(self, key: str) -> bytes | None:
+        entry = self._store.get(key)
         if not entry:
             self.misses += 1
             return None
         raw, expires = entry
         if time.time() > expires:
             self._size -= len(raw)
-            del self._store[url]
+            del self._store[key]
             self.misses += 1
             return None
+        # Promote as most-recently used.
+        self._store.pop(key, None)
+        self._store[key] = (raw, expires)
         self.hits += 1
         return raw
 
-    def put(self, url: str, raw_response: bytes, ttl: int = 300):
+    def put(self, key: str, raw_response: bytes, ttl: int = 300):
+        now = time.time()
+        # Opportunistic sweep so expired entries do not occupy RAM forever
+        # when their keys are not requested again.
+        if now - self._last_prune > 30:
+            self._prune_expired(now)
+            self._last_prune = now
         size = len(raw_response)
         if size > self._max // 4 or size == 0:
             return
@@ -120,10 +149,29 @@ class ResponseCache:
             oldest = next(iter(self._store))
             self._size -= len(self._store[oldest][0])
             del self._store[oldest]
-        if url in self._store:
-            self._size -= len(self._store[url][0])
-        self._store[url] = (raw_response, time.time() + ttl)
+        if key in self._store:
+            self._size -= len(self._store[key][0])
+        self._store[key] = (raw_response, now + ttl)
         self._size += size
+
+    def _prune_expired(self, now: float | None = None) -> None:
+        ts = now if now is not None else time.time()
+        expired = [k for k, (_, exp) in self._store.items() if exp <= ts]
+        for k in expired:
+            raw, _ = self._store.pop(k)
+            self._size -= len(raw)
+
+    @property
+    def entry_count(self) -> int:
+        return len(self._store)
+
+    @property
+    def size_bytes(self) -> int:
+        return self._size
+
+    @property
+    def max_bytes(self) -> int:
+        return self._max
 
     @staticmethod
     def parse_ttl(raw_response: bytes, url: str) -> int:
@@ -136,23 +184,49 @@ class ResponseCache:
         # Don't cache errors or non-200
         if b"HTTP/1.1 200" not in raw_response[:20]:
             return 0
-        if "no-store" in hdr or "private" in hdr or "set-cookie:" in hdr:
+        if (
+            "no-store" in hdr
+            or "private" in hdr
+            or "set-cookie:" in hdr
+            or "vary: *" in hdr
+        ):
+            return 0
+        if "cache-control:" in hdr and "no-cache" in hdr:
             return 0
 
-        # Explicit max-age
+        # Explicit max-age (prefer s-maxage when present).
+        sm = re.search(r"s-maxage=(\d+)", hdr)
+        if sm:
+            return min(int(sm.group(1)), CACHE_TTL_MAX)
         m = re.search(r"max-age=(\d+)", hdr)
         if m:
             return min(int(m.group(1)), CACHE_TTL_MAX)
 
-        # Heuristic by content type / extension
+        # immutable usually means a fingerprinted static asset.
+        if "cache-control:" in hdr and "immutable" in hdr:
+            return CACHE_TTL_STATIC_LONG
+
+        # Heuristic by content type / extension.
+        # Be conservative for static assets with querystrings unless they look
+        # versioned/fingerprinted (common for CDN assets).
+        q = ""
+        if "?" in url:
+            q = url.split("?", 1)[1].lower()
+        versioned_query = any(
+            token in q for token in ("v=", "ver=", "version=", "hash=", "id=", "_=")
+        )
         path = url.split("?")[0].lower()
         for ext in STATIC_EXTS:
             if path.endswith(ext):
+                if q and not versioned_query:
+                    return min(300, CACHE_TTL_STATIC_MED)
                 return CACHE_TTL_STATIC_LONG
 
         ct_m = re.search(r"content-type:\s*([^\r\n]+)", hdr)
         ct = ct_m.group(1) if ct_m else ""
         if "image/" in ct or "font/" in ct:
+            if q and not versioned_query:
+                return min(300, CACHE_TTL_STATIC_MED)
             return CACHE_TTL_STATIC_LONG
         if "text/css" in ct or "javascript" in ct:
             return CACHE_TTL_STATIC_MED
@@ -177,6 +251,20 @@ class ProxyServer:
         "video/",
         "audio/",
     )
+    # Domains that are very sensitive to stale/static variants or synthetic
+    # range probing; keep their traffic on the safest path.
+    _SENSITIVE_APP_SUFFIXES       = (
+        "instagram.com",
+        "cdninstagram.com",
+        "fbcdn.net",
+        "telegram.org",
+        "t.me",
+        "telegra.ph",
+        "chatgpt.com",
+        "openai.com",
+        "claude.ai",
+        "anthropic.com",
+    )
 
     def __init__(self, config: dict):
         self.host = config.get("listen_host", "127.0.0.1")
@@ -194,7 +282,13 @@ class ProxyServer:
         self.fronter = DomainFronter(config)
         self.mitm = None
         self._cache = ResponseCache(max_mb=CACHE_MAX_MB)
+        self._cache_stats_last_log = 0.0
+        self._cache_stats_interval = 60.0
+        self._cache_stats_last_hits = 0
+        self._cache_stats_last_misses = 0
         self._direct_fail_until: dict[str, float] = {}
+        self._relay_fail_until: dict[str, float] = {}
+        self._relay_fail_streak: dict[str, int] = {}
         self._servers: list[asyncio.base_events.Server] = []
         self._client_tasks: set[asyncio.Task] = set()
         self._tcp_connect_timeout = self._cfg_float(
@@ -224,6 +318,12 @@ class ProxyServer:
         # hosts override — DNS fake-map: domain/suffix → IP
         # Checked before any real DNS lookup; supports exact and suffix matching.
         self._hosts: dict[str, str] = config.get("hosts", {})
+        self._relay_cb_threshold = self._cfg_int(
+            config, "relay_cb_threshold", 3, minimum=1,
+        )
+        self._relay_cb_cooldown = self._cfg_float(
+            config, "relay_cb_cooldown", 20.0, minimum=1.0,
+        )
         configured_direct_exclude = config.get("direct_google_exclude", [])
         self._direct_google_exclude = {
             h.lower().rstrip(".")
@@ -356,6 +456,34 @@ class ProxyServer:
     def _is_bypassed(self, host: str) -> bool:
         return self._host_matches_rules(host, self._bypass_hosts)
 
+    def _relay_temporarily_disabled(self, host: str) -> bool:
+        h = host.lower().rstrip(".")
+        until = self._relay_fail_until.get(h, 0.0)
+        now = time.time()
+        if until > now:
+            return True
+        if until:
+            self._relay_fail_until.pop(h, None)
+        return False
+
+    def _record_relay_result(self, host: str, success: bool) -> None:
+        h = host.lower().rstrip(".")
+        if not h:
+            return
+        if success:
+            self._relay_fail_streak.pop(h, None)
+            self._relay_fail_until.pop(h, None)
+            return
+        streak = self._relay_fail_streak.get(h, 0) + 1
+        self._relay_fail_streak[h] = streak
+        if streak >= self._relay_cb_threshold:
+            self._relay_fail_until[h] = time.time() + self._relay_cb_cooldown
+            self._relay_fail_streak[h] = 0
+            log.warning(
+                "Relay circuit open for %s: %.0fs cooldown after %d failures",
+                h, self._relay_cb_cooldown, self._relay_cb_threshold,
+            )
+
     @staticmethod
     def _header_value(headers: dict | None, name: str) -> str:
         if not headers:
@@ -368,6 +496,12 @@ class ProxyServer:
     def _cache_allowed(self, method: str, url: str,
                        headers: dict | None, body: bytes) -> bool:
         if method.upper() != "GET" or body:
+            return False
+        if self._is_sensitive_app_url(url):
+            return False
+        req_cc = self._header_value(headers, "cache-control").lower()
+        req_pragma = self._header_value(headers, "pragma").lower()
+        if "no-cache" in req_cc or "no-store" in req_cc or "no-cache" in req_pragma:
             return False
         for name in UNCACHEABLE_HEADER_NAMES:
             if self._header_value(headers, name):
@@ -447,6 +581,56 @@ class ProxyServer:
                 log.warning("RATE LIMIT detected! " + log_msg, *log_args)
             else:
                 log.info(log_msg, *log_args)
+
+    def _maybe_log_cache_stats(self) -> None:
+        now = time.time()
+        if (now - self._cache_stats_last_log) < self._cache_stats_interval:
+            return
+        self._cache_stats_last_log = now
+
+        hits = self._cache.hits
+        misses = self._cache.misses
+        total = hits + misses
+        delta_hits = hits - self._cache_stats_last_hits
+        delta_misses = misses - self._cache_stats_last_misses
+        delta_total = max(0, delta_hits + delta_misses)
+
+        self._cache_stats_last_hits = hits
+        self._cache_stats_last_misses = misses
+
+        hit_ratio = (hits / total * 100.0) if total else 0.0
+        window_hit_ratio = (delta_hits / delta_total * 100.0) if delta_total else 0.0
+        fill_ratio = (
+            self._cache.size_bytes / self._cache.max_bytes * 100.0
+            if self._cache.max_bytes else 0.0
+        )
+
+        suggestion = "keep"
+        if fill_ratio > 90 and window_hit_ratio > 35:
+            suggestion = "increase_cache_mb"
+        elif fill_ratio < 35 and window_hit_ratio < 10:
+            suggestion = "decrease_cache_mb"
+
+        log.info(
+            "CACHE stats: hit=%.1f%% window=%.1f%% entries=%d size=%.1fMB/%.1fMB (%.0f%%) suggestion=%s",
+            hit_ratio,
+            window_hit_ratio,
+            self._cache.entry_count,
+            self._cache.size_bytes / (1024 * 1024),
+            self._cache.max_bytes / (1024 * 1024),
+            fill_ratio,
+            suggestion,
+        )
+
+    @classmethod
+    def _is_sensitive_app_host(cls, host: str) -> bool:
+        h = host.lower().rstrip(".")
+        return any(h == s or h.endswith("." + s) for s in cls._SENSITIVE_APP_SUFFIXES)
+
+    @classmethod
+    def _is_sensitive_app_url(cls, url: str) -> bool:
+        host = (urlparse(url).hostname or "").lower()
+        return bool(host) and cls._is_sensitive_app_host(host)
 
     async def start(self):
         http_srv = await asyncio.start_server(self._on_client, self.host, self.port)
@@ -1243,32 +1427,48 @@ class ProxyServer:
                 if await self._maybe_stream_download(method, url, headers, body, writer):
                     continue
 
+                cacheable = self._cache_allowed(method, url, headers, body)
+                cache_key = ResponseCache.build_key(url, headers) if cacheable else ""
+
                 # Check local cache first (GET only)
                 response = None
-                if self._cache_allowed(method, url, headers, body):
-                    response = self._cache.get(url)
+                if cacheable:
+                    response = self._cache.get(cache_key)
                     if response:
                         log.debug("Cache HIT: %s", url[:60])
 
                 if response is None:
-                    # Relay through Apps Script
-                    try:
-                        response = await self._relay_smart(method, url, headers, body)
-                    except Exception as e:
-                        log.error("Relay error (%s): %s", url[:60], e)
-                        err_body = f"Relay error: {e}".encode()
+                    if self._relay_temporarily_disabled(host):
+                        err_body = b"Relay temporarily unavailable for this host; retry shortly."
                         response = (
-                            b"HTTP/1.1 502 Bad Gateway\r\n"
+                            b"HTTP/1.1 503 Service Unavailable\r\n"
                             b"Content-Type: text/plain\r\n"
+                            b"Retry-After: 20\r\n"
                             b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
                             b"\r\n" + err_body
                         )
+                        log.warning("Relay circuit-open fast-fail: %s", host)
+                    else:
+                    # Relay through Apps Script
+                        try:
+                            response = await self._relay_smart(method, url, headers, body)
+                            self._record_relay_result(host, success=True)
+                        except Exception as e:
+                            self._record_relay_result(host, success=False)
+                            log.error("Relay error (%s): %s", url[:60], e)
+                            err_body = f"Relay error: {e}".encode()
+                            response = (
+                                b"HTTP/1.1 502 Bad Gateway\r\n"
+                                b"Content-Type: text/plain\r\n"
+                                b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
+                                b"\r\n" + err_body
+                            )
 
                     # Cache successful GET responses
-                    if self._cache_allowed(method, url, headers, body) and response:
+                    if cacheable and response:
                         ttl = ResponseCache.parse_ttl(response, url)
                         if ttl > 0:
-                            self._cache.put(url, response, ttl)
+                            self._cache.put(cache_key, response, ttl)
                             log.debug("Cached (%ds): %s", ttl, url[:60])
 
                 # Inject permissive CORS headers whenever the browser sent
@@ -1279,6 +1479,7 @@ class ProxyServer:
                     response = self._inject_cors_headers(response, origin)
 
                 self._log_response_summary(url, response)
+                self._maybe_log_cache_stats()
 
                 writer.write(response)
                 await writer.drain()
@@ -1359,6 +1560,9 @@ class ProxyServer:
           challenge pages.
         """
         if method == "GET" and not body:
+            # Avoid synthetic range-probe/parallel path for fragile web apps.
+            if self._is_sensitive_app_url(url):
+                return await self.fronter.relay(method, url, headers, body)
             # Respect client's own Range header verbatim.
             if headers:
                 for k in headers:
@@ -1397,6 +1601,8 @@ class ProxyServer:
                                      headers: dict | None, body: bytes,
                                      writer) -> bool:
         if method.upper() != "GET" or body:
+            return False
+        if self._is_sensitive_app_url(url):
             return False
         if headers:
             for key in headers:
@@ -1467,25 +1673,46 @@ class ProxyServer:
         if await self._maybe_stream_download(method, url, headers, body, writer):
             return
 
+        cacheable = self._cache_allowed(method, url, headers, body)
+        cache_key = ResponseCache.build_key(url, headers) if cacheable else ""
+
         # Cache check for GET
         response = None
-        if self._cache_allowed(method, url, headers, body):
-            response = self._cache.get(url)
+        if cacheable:
+            response = self._cache.get(cache_key)
             if response:
                 log.debug("Cache HIT (HTTP): %s", url[:60])
 
         if response is None:
-            response = await self._relay_smart(method, url, headers, body)
+            host = (urlparse(url).hostname or "").lower()
+            if self._relay_temporarily_disabled(host):
+                err_body = b"Relay temporarily unavailable for this host; retry shortly."
+                response = (
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Type: text/plain\r\n"
+                    b"Retry-After: 20\r\n"
+                    b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
+                    b"\r\n" + err_body
+                )
+                log.warning("Relay circuit-open fast-fail: %s", host)
+            else:
+                try:
+                    response = await self._relay_smart(method, url, headers, body)
+                    self._record_relay_result(host, success=True)
+                except Exception:
+                    self._record_relay_result(host, success=False)
+                    raise
             # Cache successful GET
-            if self._cache_allowed(method, url, headers, body) and response:
+            if cacheable and response:
                 ttl = ResponseCache.parse_ttl(response, url)
                 if ttl > 0:
-                    self._cache.put(url, response, ttl)
+                    self._cache.put(cache_key, response, ttl)
 
         if origin and response:
             response = self._inject_cors_headers(response, origin)
 
         self._log_response_summary(url, response)
+        self._maybe_log_cache_stats()
 
         writer.write(response)
         await writer.drain()

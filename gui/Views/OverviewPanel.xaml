@@ -49,6 +49,12 @@
                         <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Upload" Style="{StaticResource Caption}"/><TextBlock Text="{Binding SpeedUp}" Style="{StaticResource StatMed}"/></StackPanel></Border>
                         <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Success" Style="{StaticResource Caption}"/><TextBlock Text="{Binding SuccessRateLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
                     </UniformGrid>
+                    <UniformGrid Columns="4" Margin="0,0,0,6">
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Total Traffic" Style="{StaticResource Caption}"/><TextBlock Text="{Binding TotalTrafficLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Total Download" Style="{StaticResource Caption}"/><TextBlock Text="{Binding TotalDown}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Total Upload" Style="{StaticResource Caption}"/><TextBlock Text="{Binding TotalUp}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Live Bandwidth" Style="{StaticResource Caption}"/><TextBlock Text="{Binding LiveBandwidthLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                    </UniformGrid>
                     <Border Style="{StaticResource AnalyticsCardLocal}" Margin="0,0,0,8">
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -61,6 +67,17 @@
                         <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Window Success" Style="{StaticResource Caption}"/><TextBlock Text="{Binding WindowSuccessRateLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
                         <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Window Errors" Style="{StaticResource Caption}"/><TextBlock Text="{Binding WindowErrorsLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
                         <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Peak Connections" Style="{StaticResource Caption}"/><TextBlock Text="{Binding PeakConnectionsLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                    </UniformGrid>
+                    <UniformGrid Columns="4" Margin="0,0,0,6">
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Uptime" Style="{StaticResource Caption}"/><TextBlock Text="{Binding Uptime}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Session Time" Style="{StaticResource Caption}"/><TextBlock Text="{Binding SessionDurationLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Avg Latency (Session)" Style="{StaticResource Caption}"/><TextBlock Text="{Binding SessionAvgLatencyLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Avg RPS (Session)" Style="{StaticResource Caption}"/><TextBlock Text="{Binding SessionAvgRpsLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                    </UniformGrid>
+                    <UniformGrid Columns="3" Margin="0,0,0,6">
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Avg Success (Session)" Style="{StaticResource Caption}"/><TextBlock Text="{Binding SessionAvgSuccessLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Quick Health Grade" Style="{StaticResource Caption}"/><TextBlock Text="{Binding QuickHealthGradeLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
+                        <Border Style="{StaticResource AnalyticsCardLocal}"><StackPanel><TextBlock Text="Top Failing Host" Style="{StaticResource Caption}"/><TextBlock Text="{Binding TopFailingHostLabel}" Style="{StaticResource StatMed}"/></StackPanel></Border>
                     </UniformGrid>
                     <Border Style="{StaticResource Panel}">
                         <TextBlock Text="{Binding Diagnostics}" TextWrapping="Wrap"/>
