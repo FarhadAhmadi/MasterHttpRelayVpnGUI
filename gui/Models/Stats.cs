@@ -26,6 +26,26 @@ public class RelayWindowStat
     [JsonPropertyName("success_rate")] public double SuccessRate { get; set; } = 1.0;
 }
 
+public class ClientConnectionInfo
+{
+    [JsonPropertyName("client_id")] public string ClientId { get; set; } = "";
+    [JsonPropertyName("ip")] public string Ip { get; set; } = "";
+    [JsonPropertyName("transport")] public string Transport { get; set; } = "";
+    [JsonPropertyName("platform_hint")] public string PlatformHint { get; set; } = "";
+    [JsonPropertyName("user_agent")] public string UserAgent { get; set; } = "";
+    [JsonPropertyName("connected_at")] public double ConnectedAt { get; set; } = 0;
+    [JsonPropertyName("last_seen")] public double LastSeen { get; set; } = 0;
+    [JsonPropertyName("active")] public bool Active { get; set; } = false;
+    [JsonPropertyName("requests")] public int Requests { get; set; } = 0;
+    [JsonPropertyName("errors")] public int Errors { get; set; } = 0;
+    [JsonPropertyName("bytes_up")] public long BytesUp { get; set; } = 0;
+    [JsonPropertyName("bytes_down")] public long BytesDown { get; set; } = 0;
+    [JsonPropertyName("latency_ms_avg")] public double LatencyMsAvg { get; set; } = 0;
+    [JsonPropertyName("latency_samples")] public int LatencySamples { get; set; } = 0;
+    [JsonPropertyName("target_host")] public string TargetHost { get; set; } = "";
+    [JsonPropertyName("last_error")] public string LastError { get; set; } = "";
+}
+
 public class StatsSnapshot
 {
     [JsonPropertyName("uptime")]           public long Uptime { get; set; }
@@ -55,5 +75,8 @@ public class StatsSnapshot
     [JsonPropertyName("cache_effective_hit_rate")] public double CacheEffectiveHitRate { get; set; } = 0;
     [JsonPropertyName("cache_entries")]     public int CacheEntries { get; set; } = 0;
     [JsonPropertyName("cache_bytes")]       public long CacheBytes { get; set; } = 0;
+    [JsonPropertyName("clients_active")]    public int ClientsActive { get; set; } = 0;
+    [JsonPropertyName("clients_total_seen")] public int ClientsTotalSeen { get; set; } = 0;
+    [JsonPropertyName("clients_detail")]    public List<ClientConnectionInfo> ClientsDetail { get; set; } = new();
     [JsonPropertyName("endpoints_detail")]  public List<RelayEndpointDetail> EndpointsDetail { get; set; } = new();
 }

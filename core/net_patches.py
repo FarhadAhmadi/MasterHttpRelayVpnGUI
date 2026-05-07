@@ -110,7 +110,7 @@ def _patch_parallel_defaults(cfg):
     DF._mrelay_par_patched = True
 
     chunk = int(cfg.get("chunk_size", 128 * 1024))
-    par   = int(cfg.get("max_parallel", 4))
+    par   = int(cfg.get("max_parallel", 3))
     orig = DF.relay_parallel
 
     @functools.wraps(orig)

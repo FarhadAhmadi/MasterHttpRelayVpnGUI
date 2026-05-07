@@ -38,7 +38,7 @@ public sealed class HealthMonitorService : IDisposable
                     else
                     {
                         var (host, port) = endpoint();
-                        result = await ProbeAsync(host, port, ct);
+                        result = await ProbeAsync(NormalizeProbeHost(host), port, ct);
                     }
 
                     Checked?.Invoke(result);
@@ -53,6 +53,21 @@ public sealed class HealthMonitorService : IDisposable
                 }
             }
         }, ct);
+    }
+
+    static string NormalizeProbeHost(string host)
+    {
+        var h = (host ?? "").Trim();
+        if (h.Length == 0) return "127.0.0.1";
+
+        // Wildcard listen addresses are valid bind targets, but not connect targets.
+        if (h == "0.0.0.0" || h == "::" || h == "[::]" || h == "*" || h == "+")
+            return "127.0.0.1";
+
+        if (h.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+            return "127.0.0.1";
+
+        return h;
     }
 
     static async Task<HealthCheckResult> ProbeAsync(string host, int port, CancellationToken ct)

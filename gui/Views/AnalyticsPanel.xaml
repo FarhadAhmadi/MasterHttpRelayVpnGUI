@@ -50,6 +50,8 @@
                                 Command="{Binding SetStatsSectionCmd}" CommandParameter="overview"/>
                         <Button Content="Relays" Style="{StaticResource SectionButton}"
                                 Command="{Binding SetStatsSectionCmd}" CommandParameter="relays"/>
+                        <Button Content="Clients" Style="{StaticResource SectionButton}"
+                                Command="{Binding SetStatsSectionCmd}" CommandParameter="clients"/>
                         <Button Content="Support" Style="{StaticResource SectionButton}"
                                 Command="{Binding SetStatsSectionCmd}" CommandParameter="support"/>
                     </StackPanel>
@@ -65,6 +67,9 @@
                                         <Setter Property="Visibility" Value="Collapsed"/>
                                     </DataTrigger>
                                     <DataTrigger Binding="{Binding StatsSection}" Value="support">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding StatsSection}" Value="clients">
                                         <Setter Property="Visibility" Value="Collapsed"/>
                                     </DataTrigger>
                                 </Style.Triggers>
@@ -84,6 +89,19 @@
                             </Style>
                         </views:RelaysPanel.Style>
                     </views:RelaysPanel>
+
+                    <views:ClientsPanel>
+                        <views:ClientsPanel.Style>
+                            <Style TargetType="views:ClientsPanel">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding StatsSection}" Value="clients">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </views:ClientsPanel.Style>
+                    </views:ClientsPanel>
 
                     <views:SupportPanel>
                         <views:SupportPanel.Style>

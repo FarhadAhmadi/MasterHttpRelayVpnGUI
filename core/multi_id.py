@@ -281,9 +281,9 @@ def install(cfg):
     _dispatcher = MultiIdDispatcher(
         ids,
         fail_threshold=int(cfg.get("multi_id_fail_threshold", 3)),
-        cooldown=float(cfg.get("multi_id_cooldown_seconds", 30.0)),
+        cooldown=float(cfg.get("multi_id_cooldown_seconds", 20.0)),
         strategy=cfg.get("multi_id_strategy", "balanced"),
-        max_consecutive=int(cfg.get("multi_id_max_consecutive", 2)),
+        max_consecutive=int(cfg.get("multi_id_max_consecutive", 1)),
     )
 
     import domain_fronter
@@ -351,6 +351,28 @@ def snapshot():
 
 def current_request_id():
     return _request_sid.get("")
+
+
+def reset_runtime():
+    if _dispatcher is None:
+        return
+    now = time.monotonic()
+    with _dispatcher._lock:
+        _dispatcher._active_sid = ""
+        _dispatcher._rr = 0
+        _dispatcher._last_sid = ""
+        _dispatcher._consecutive = 0
+        _dispatcher._global_recent_errors = 0
+        for ep in _dispatcher._eps:
+            ep.ok = 0
+            ep.err = 0
+            ep.recent_failures = 0
+            ep.parked_until = 0.0
+            ep.last_err = ""
+            ep.latency_ms = 0.0
+            ep.last_used = now
+            ep.uses = 0
+            ep.events.clear()
 
 
 def _short(sid):

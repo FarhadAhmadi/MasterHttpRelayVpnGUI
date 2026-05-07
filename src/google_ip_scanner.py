@@ -107,6 +107,27 @@ async def _probe_ip(
             return ProbeResult(ip=ip, error=f"probe failed: {type(e).__name__}")
 
 
+async def scan_fastest(
+    front_domain: str,
+    *,
+    timeout: float = GOOGLE_SCANNER_TIMEOUT,
+    concurrency: int = GOOGLE_SCANNER_CONCURRENCY,
+    candidates: list[str] | tuple[str, ...] | None = None,
+) -> list[ProbeResult]:
+    """Return probe results sorted by quality (successful first, then latency)."""
+    ips = list(candidates) if candidates else list(CANDIDATE_IPS)
+    if not ips:
+        return []
+    semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+    tasks = [
+        _probe_ip(ip, front_domain, semaphore, max(0.5, float(timeout)))
+        for ip in ips
+    ]
+    results = await asyncio.gather(*tasks)
+    results.sort(key=lambda r: (not r.ok, r.latency_ms or float("inf")))
+    return results
+
+
 async def run(front_domain: str) -> bool:
     """
     Scan all candidate Google IPs and display results.
@@ -127,18 +148,12 @@ async def run(front_domain: str) -> bool:
     print(f"  Concurrency: {concurrency} parallel probes")
     print()
 
-    # Create semaphore to limit concurrency
-    semaphore = asyncio.Semaphore(concurrency)
-
-    # Launch all probes concurrently
-    tasks = [
-        _probe_ip(ip, front_domain, semaphore, timeout)
-        for ip in CANDIDATE_IPS
-    ]
-    results = await asyncio.gather(*tasks)
-
-    # Sort by latency (successful first, then by speed)
-    results.sort(key=lambda r: (not r.ok, r.latency_ms or float("inf")))
+    results = await scan_fastest(
+        front_domain,
+        timeout=timeout,
+        concurrency=concurrency,
+        candidates=CANDIDATE_IPS,
+    )
 
     # Display results table
     print(f"{'IP':<20} {'LATENCY':<12} {'STATUS':<25}")

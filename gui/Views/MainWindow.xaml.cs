@@ -52,7 +52,7 @@ public partial class MainWindow : Window
         {
             _allowClose = true;
             _shutdownInProgress = false;
-            Dispatcher.BeginInvoke(new Action(Close));
+            _ = Dispatcher.BeginInvoke(new Action(Close));
         }
     }
 

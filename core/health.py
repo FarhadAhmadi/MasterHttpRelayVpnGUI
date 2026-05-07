@@ -76,3 +76,10 @@ def snapshot():
         "window_errors": err,
         "window_success_rate": (ok / total) if total else 1.0,
     }
+
+
+def reset():
+    global _last_activity
+    with _lock:
+        _window.clear()
+        _last_activity = 0.0

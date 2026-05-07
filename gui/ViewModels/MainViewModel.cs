@@ -3,8 +3,10 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net.NetworkInformation;
 using System.Text.RegularExpressions;
 using System.Text;
 using System.Threading;
@@ -24,6 +26,7 @@ public class MainViewModel : ObservableBase
     readonly CoreProcessHost _core = new();
     readonly FirstRunService _firstRun = new();
     readonly HealthMonitorService _healthMonitor = new();
+    readonly UpdateService _updateService = new();
     readonly AutoOptimizer _autoTuner;
     readonly Timer _clockTimer;
     readonly DispatcherTimer _logFlushTimer;
@@ -36,10 +39,29 @@ public class MainViewModel : ObservableBase
     ProxyToggleService.ProxyState? _previousProxyState;
     bool _proxyManagedByApp;
     int _shutdownStarted;
+    DateTime _lastRuntimeGuardAt = DateTime.MinValue;
+    DateTime _lastWatchdogSignalAt = DateTime.MinValue;
+    DateTime _lastWatchdogRestartAt = DateTime.MinValue;
+    int _watchdogFailureStreak = 0;
+    bool _watchdogRestarting;
+
+    sealed record AnalyzerFinding(string Severity, string Area, string Message, int Weight);
+    sealed record AnalyzerAction(string Key, string Label, Action Apply);
+    sealed class AnalyzerReport
+    {
+        public List<AnalyzerFinding> Findings { get; } = new();
+        public List<string> RelayNotes { get; } = new();
+        public List<AnalyzerAction> Actions { get; } = new();
+        public List<string> Insights { get; } = new();
+        public int RiskScore { get; set; }
+        public string Grade { get; set; } = "A";
+        public string PrimaryCause { get; set; } = "Stable";
+    }
 
     const int MaxLogLines = 500;
     public ObservableCollection<LogEntry> Logs { get; } = new();
     public ObservableCollection<RelayEndpointDetail> RelayDetails { get; } = new();
+    public ObservableCollection<ClientConnectionInfo> ClientConnections { get; } = new();
     public ObservableCollection<DeploymentEntry> DeploymentIds { get; } = new();
     public ICollectionView LogsView { get; }
     public MasterRelayVPN.Services.Localization Loc => MasterRelayVPN.Services.Localization.Instance;
@@ -92,6 +114,7 @@ public class MainViewModel : ObservableBase
             StatsSection = (p as string) ?? "overview";
             if (StatsSection == "overview") StatsSubsection = "health";
             else if (StatsSection == "relays") StatsSubsection = "relay_health";
+            else if (StatsSection == "clients") StatsSubsection = "client_live";
             else if (StatsSection == "support") StatsSubsection = "support_paths";
         });
         SetStatsSubsectionCmd = new RelayCommand(p => StatsSubsection = (p as string) ?? "health");
@@ -114,6 +137,7 @@ public class MainViewModel : ObservableBase
         CopyRelayStatusCmd = new RelayCommand(CopyRelayStatusToClipboard);
         CopyRuntimeSnapshotCmd = new RelayCommand(CopyRuntimeSnapshotToClipboard);
         AnalyzeAndRecommendCmd = new RelayCommand(AnalyzeAndRecommend);
+        ResetSystemStateCmd = new RelayCommand(async () => await ResetSystemStateAsync(), () => !Busy);
         ToggleLanguageCmd = new RelayCommand(ToggleLanguage);
 
         AddDeploymentCmd    = new RelayCommand(AddDeployment);
@@ -128,6 +152,7 @@ public class MainViewModel : ObservableBase
         Raise(nameof(SysProxyStateLabel));
         Raise(nameof(SysProxyActionLabel));
         RefreshCertStatus();
+        ApplySafeDefaultsLock();
 
         _healthMonitor.Checked += r => OnUi(() => OnHealthChecked(r));
         _healthMonitor.Start(
@@ -158,6 +183,10 @@ public class MainViewModel : ObservableBase
             Loc.Lang = _cfg.Language ?? "en";
             SyncDeploymentList();
             RefreshCertStatus();
+            ApplySafeDefaultsLock();
+            await RunStartupSelfTestAsync();
+            if (AutoUpdateCheck)
+                await CheckForUpdatesAsync(silent: true);
 
             if (report.CertGenerated || report.CertTrusted)
                 AddLog(LogLevel.Info, "setup",
@@ -167,6 +196,176 @@ public class MainViewModel : ObservableBase
         }
         catch (Exception ex) { AddLog(LogLevel.Error, "setup", ex.Message); }
         finally { BootStatus = ""; Busy = false; }
+    }
+
+    void ApplySafeDefaultsLock()
+    {
+        if (!SafeDefaultsLock) return;
+        VerifySsl = true;
+        EnableHttp2 = false;
+        if (MultiIdStrategy != "fair_spread")
+            MultiIdStrategy = "fair_spread";
+        MultiIdFailThreshold = Math.Clamp(MultiIdFailThreshold, 1, 2);
+        MultiIdCooldownSeconds = Math.Clamp(MultiIdCooldownSeconds, 20, 120);
+        MultiIdMaxConsecutive = Math.Clamp(MultiIdMaxConsecutive, 1, 2);
+        MaxParallel = Math.Clamp(MaxParallel, 1, 5);
+        FragmentSize = Math.Clamp(FragmentSize, 8 * 1024, 32 * 1024);
+        RelayTimeout = Math.Clamp(RelayTimeout, 20, 45);
+        RetrySafeAttempts = Math.Clamp(RetrySafeAttempts, 1, 3);
+        RetryBackoffBaseMs = Math.Clamp(RetryBackoffBaseMs, 80, 300);
+        CacheEnabled = true;
+        CacheMaxMb = Math.Clamp(CacheMaxMb, 96, 512);
+        CacheStaleIfErrorS = Math.Clamp(CacheStaleIfErrorS, 180, 900);
+        AutoGoogleIpRefresh = true;
+    }
+
+    async Task RunStartupSelfTestAsync()
+    {
+        try
+        {
+            var issues = new List<string>();
+            var fixes = new List<Func<Task>>();
+
+            if (!CertInstallService.CertExists() || !CertInstallService.IsTrusted())
+            {
+                issues.Add("- CA certificate is missing or untrusted.");
+                fixes.Add(async () =>
+                {
+                    try
+                    {
+                        await _core.GenerateCaAsync();
+                    }
+                    catch { }
+                    try
+                    {
+                        var outcome = CertInstallService.InstallCurrentUser();
+                        AddLog(outcome.Result == CertResult.Failed ? LogLevel.Warning : LogLevel.Info,
+                            "selftest", outcome.Message);
+                    }
+                    catch { }
+                });
+            }
+
+            if (ListenPort <= 0 || ListenPort > 65535)
+            {
+                issues.Add("- Listen port is invalid.");
+                fixes.Add(async () =>
+                {
+                    ListenPort = 8085;
+                    await Task.CompletedTask;
+                });
+            }
+            else
+            {
+                try
+                {
+                    var listeners = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners();
+                    if (listeners.Any(ep => ep.Port == ListenPort))
+                    {
+                        issues.Add($"- Listen port {ListenPort} is already used.");
+                        fixes.Add(async () =>
+                        {
+                            var preferred = new[] { 8085, 10808, 10809, 18080, 28080 };
+                            var taken = listeners.Select(x => x.Port).ToHashSet();
+                            var next = preferred.FirstOrDefault(p => !taken.Contains(p));
+                            ListenPort = next > 0 ? next : (ListenPort + 1);
+                            await Task.CompletedTask;
+                        });
+                    }
+                }
+                catch { }
+            }
+
+            if (string.IsNullOrWhiteSpace(GoogleIp) && Mode == "apps_script")
+            {
+                issues.Add("- Google front IP is empty.");
+                fixes.Add(async () =>
+                {
+                    GoogleIp = "216.239.38.120";
+                    await Task.CompletedTask;
+                });
+            }
+
+            if (issues.Count == 0)
+            {
+                AddLog(LogLevel.Info, "selftest", "Startup self-test passed.");
+                return;
+            }
+
+            var ask = MessageBox.Show(
+                "Startup self-test found issues:\n\n"
+                + string.Join("\n", issues)
+                + "\n\nApply safe automatic fixes now?",
+                "Startup Self-Test",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (ask != MessageBoxResult.Yes)
+            {
+                AddLog(LogLevel.Warning, "selftest", "Self-test issues detected; fixes skipped by user.");
+                return;
+            }
+
+            foreach (var fix in fixes)
+            {
+                try { await fix(); } catch { }
+            }
+            ClampNetworkKnobs();
+            PersistDeployments();
+            SaveConfigSafe("selftest");
+            RaiseAllConfigProps();
+            AddLog(LogLevel.Info, "selftest", "Self-test fixes applied.");
+        }
+        catch (Exception ex)
+        {
+            AddLog(LogLevel.Warning, "selftest", "Self-test error: " + ex.Message);
+        }
+    }
+
+    async Task CheckForUpdatesAsync(bool silent)
+    {
+        try
+        {
+            var currentVersion = AppVersionLabel;
+            var result = await _updateService.CheckAsync(_cfg, currentVersion, CancellationToken.None);
+            if (!result.Success)
+            {
+                if (!silent)
+                    MessageBox.Show(result.Message, "Update Check", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (!result.IsUpdateAvailable)
+            {
+                if (!silent)
+                    MessageBox.Show("You are up to date.", "Update Check", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var prompt = MessageBox.Show(
+                $"Update available on {result.Channel} channel.\n\nCurrent: {result.CurrentVersion}\nLatest: {result.LatestVersion}\n\nOpen download page now?",
+                "Update Available",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Information);
+            if (prompt == MessageBoxResult.Yes && !string.IsNullOrWhiteSpace(result.DownloadUrl))
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = result.DownloadUrl,
+                        UseShellExecute = true,
+                    });
+                }
+                catch (Exception ex)
+                {
+                    AddLog(LogLevel.Warning, "update", "Could not open update URL: " + ex.Message);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!silent)
+                MessageBox.Show("Update check failed: " + ex.Message, "Update Check", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     AppConfig _cfg = new();
@@ -182,18 +381,26 @@ public class MainViewModel : ObservableBase
         {
             nameof(Mode), nameof(FrontDomain), nameof(CustomSni), nameof(ScriptId),
             nameof(WorkerHost), nameof(CustomDomain), nameof(AuthKey), nameof(GoogleIp),
-            nameof(ListenHost), nameof(ListenPort), nameof(LogLevelText), nameof(VerifySsl),
+            nameof(ListenHost), nameof(AllowLan), nameof(ListenPort), nameof(LogLevelText), nameof(VerifySsl),
             nameof(EnableHttp2), nameof(EnableChunked), nameof(ChunkSize),
             nameof(MaxParallel), nameof(FragmentSize), nameof(ActivePreset),
+            nameof(SafeDefaultsLock),
             nameof(CacheEnabled), nameof(CacheMaxMb), nameof(CacheDefaultTtlS), nameof(CacheStaleIfErrorS),
             nameof(RelayCbThreshold), nameof(RelayCbCooldown),
+            nameof(RelayTimeout), nameof(ScriptBlacklistTtlS), nameof(RetrySafeAttempts), nameof(RetryBackoffBaseMs),
+            nameof(AutoGoogleIpRefresh), nameof(GoogleIpRefreshIntervalS), nameof(GoogleIpProbeTimeoutS),
+            nameof(GoogleIpProbeSampleSize), nameof(GoogleIpSwitchMinImprovementMs),
+            nameof(WatchdogEnabled), nameof(WatchdogFailureThreshold), nameof(WatchdogCooldownS),
             nameof(MultiIdFailThreshold), nameof(MultiIdCooldownSeconds),
             nameof(MultiIdStrategy), nameof(MultiIdMaxConsecutive),
-            nameof(DirectBypassDomainsText),
+            nameof(DirectBypassDomainsText), nameof(NoMitmHostsText), nameof(NoMitmCidrsText), nameof(ForceRelayDomainsText),
+            nameof(TcpSendBuffer), nameof(TcpRecvBuffer), nameof(HalfOpenRxTimeoutS), nameof(HalfOpenProbeTimeoutS), nameof(DcFailoverAttempts),
+            nameof(UpdateChannel), nameof(AutoUpdateCheck), nameof(UpdateMetadataUrl), nameof(UpdatePublicKeyPem),
         }) Raise(n);
     }
 
     public string Mode          { get => _cfg.Mode;          set { _cfg.Mode = value; Raise(); } }
+    public bool   SafeDefaultsLock { get => _cfg.SafeDefaultsLock; set { _cfg.SafeDefaultsLock = value; Raise(); } }
     public string FrontDomain   { get => _cfg.FrontDomain ?? ""; set { _cfg.FrontDomain = value; Raise(); } }
     public string CustomSni     { get => _cfg.CustomSni ?? "";   set { _cfg.CustomSni = value; Raise(); } }
     public string ScriptId      { get => _cfg.ScriptId ?? "";    set { _cfg.ScriptId = value; Raise(); } }
@@ -202,6 +409,27 @@ public class MainViewModel : ObservableBase
     public string AuthKey       { get => _cfg.AuthKey;        set { _cfg.AuthKey = value; Raise(); } }
     public string GoogleIp      { get => _cfg.GoogleIp ?? ""; set { _cfg.GoogleIp = value; Raise(); } }
     public string ListenHost    { get => _cfg.ListenHost;     set { _cfg.ListenHost = value; Raise(); } }
+    public bool   AllowLan
+    {
+        get => _cfg.LanSharing;
+        set
+        {
+            if (_cfg.LanSharing == value) return;
+            _cfg.LanSharing = value;
+            if (value)
+            {
+                _cfg.ListenHost = "0.0.0.0";
+                Raise(nameof(ListenHost));
+            }
+            else if (string.IsNullOrWhiteSpace(_cfg.ListenHost) ||
+                     _cfg.ListenHost == "0.0.0.0" || _cfg.ListenHost == "::")
+            {
+                _cfg.ListenHost = "127.0.0.1";
+                Raise(nameof(ListenHost));
+            }
+            Raise();
+        }
+    }
     public int    ListenPort    { get => _cfg.ListenPort;     set { _cfg.ListenPort = value; Raise(); } }
     public string LogLevelText  { get => _cfg.LogLevel;       set { _cfg.LogLevel = value; Raise(); } }
     public bool   VerifySsl     { get => _cfg.VerifySsl;      set { _cfg.VerifySsl = value; Raise(); } }
@@ -216,6 +444,18 @@ public class MainViewModel : ObservableBase
     public int    CacheStaleIfErrorS { get => _cfg.CacheStaleIfErrorS; set { _cfg.CacheStaleIfErrorS = value; Raise(); } }
     public int    RelayCbThreshold { get => _cfg.RelayCbThreshold; set { _cfg.RelayCbThreshold = value; Raise(); } }
     public int    RelayCbCooldown { get => _cfg.RelayCbCooldown; set { _cfg.RelayCbCooldown = value; Raise(); } }
+    public int    RelayTimeout { get => _cfg.RelayTimeout; set { _cfg.RelayTimeout = value; Raise(); } }
+    public int    ScriptBlacklistTtlS { get => _cfg.ScriptBlacklistTtlS; set { _cfg.ScriptBlacklistTtlS = value; Raise(); } }
+    public int    RetrySafeAttempts { get => _cfg.RetrySafeAttempts; set { _cfg.RetrySafeAttempts = value; Raise(); } }
+    public int    RetryBackoffBaseMs { get => _cfg.RetryBackoffBaseMs; set { _cfg.RetryBackoffBaseMs = value; Raise(); } }
+    public bool   AutoGoogleIpRefresh { get => _cfg.AutoGoogleIpRefresh; set { _cfg.AutoGoogleIpRefresh = value; Raise(); } }
+    public int    GoogleIpRefreshIntervalS { get => _cfg.GoogleIpRefreshIntervalS; set { _cfg.GoogleIpRefreshIntervalS = value; Raise(); } }
+    public int    GoogleIpProbeTimeoutS { get => _cfg.GoogleIpProbeTimeoutS; set { _cfg.GoogleIpProbeTimeoutS = value; Raise(); } }
+    public int    GoogleIpProbeSampleSize { get => _cfg.GoogleIpProbeSampleSize; set { _cfg.GoogleIpProbeSampleSize = value; Raise(); } }
+    public int    GoogleIpSwitchMinImprovementMs { get => _cfg.GoogleIpSwitchMinImprovementMs; set { _cfg.GoogleIpSwitchMinImprovementMs = value; Raise(); } }
+    public bool   WatchdogEnabled { get => _cfg.WatchdogEnabled; set { _cfg.WatchdogEnabled = value; Raise(); } }
+    public int    WatchdogFailureThreshold { get => _cfg.WatchdogFailureThreshold; set { _cfg.WatchdogFailureThreshold = value; Raise(); } }
+    public int    WatchdogCooldownS { get => _cfg.WatchdogCooldownS; set { _cfg.WatchdogCooldownS = value; Raise(); } }
     public string ActivePreset  { get => _cfg.Preset; set { _cfg.Preset = value; Raise(); } }
     public int    MultiIdFailThreshold
     {
@@ -252,6 +492,64 @@ public class MainViewModel : ObservableBase
             Raise();
         }
     }
+    public string ForceRelayDomainsText
+    {
+        get => string.Join(Environment.NewLine, _cfg.ForceRelayHosts ?? new List<string>());
+        set
+        {
+            var vals = (value ?? "")
+                .Split(new[] { '\r', '\n', ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim().TrimStart('.').ToLowerInvariant())
+                .Where(x => x.Length > 0)
+                .Distinct()
+                .ToList();
+            _cfg.ForceRelayHosts = vals;
+            Raise();
+        }
+    }
+    public string NoMitmHostsText
+    {
+        get => string.Join(Environment.NewLine, _cfg.NoMitmHosts ?? new List<string>());
+        set
+        {
+            var vals = (value ?? "")
+                .Split(new[] { '\r', '\n', ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormalizeHostRuleKeepWildcard)
+                .Where(x => x.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            _cfg.NoMitmHosts = vals;
+            Raise();
+        }
+    }
+    public string NoMitmCidrsText
+    {
+        get => string.Join(Environment.NewLine, _cfg.NoMitmCidrs ?? new List<string>());
+        set
+        {
+            var vals = (value ?? "")
+                .Split(new[] { '\r', '\n', ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => x.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            _cfg.NoMitmCidrs = vals;
+            Raise();
+        }
+    }
+    public int TcpSendBuffer { get => _cfg.TcpSendBuffer; set { _cfg.TcpSendBuffer = value; Raise(); } }
+    public int TcpRecvBuffer { get => _cfg.TcpRecvBuffer; set { _cfg.TcpRecvBuffer = value; Raise(); } }
+    public int HalfOpenRxTimeoutS { get => _cfg.HalfOpenRxTimeoutS; set { _cfg.HalfOpenRxTimeoutS = value; Raise(); } }
+    public double HalfOpenProbeTimeoutS { get => _cfg.HalfOpenProbeTimeoutS; set { _cfg.HalfOpenProbeTimeoutS = value; Raise(); } }
+    public int DcFailoverAttempts { get => _cfg.DcFailoverAttempts; set { _cfg.DcFailoverAttempts = value; Raise(); } }
+    public string UpdateChannel
+    {
+        get => string.IsNullOrWhiteSpace(_cfg.UpdateChannel) ? "stable" : _cfg.UpdateChannel;
+        set { _cfg.UpdateChannel = (value ?? "stable").Trim().ToLowerInvariant() == "beta" ? "beta" : "stable"; Raise(); }
+    }
+    public bool AutoUpdateCheck { get => _cfg.AutoUpdateCheck; set { _cfg.AutoUpdateCheck = value; Raise(); } }
+    public string UpdateMetadataUrl { get => _cfg.UpdateMetadataUrl ?? ""; set { _cfg.UpdateMetadataUrl = value; Raise(); } }
+    public string UpdatePublicKeyPem { get => _cfg.UpdatePublicKeyPem ?? ""; set { _cfg.UpdatePublicKeyPem = value; Raise(); } }
 
     string _status = "Stopped";
     public string Status
@@ -372,6 +670,8 @@ public class MainViewModel : ObservableBase
     public string CacheEffectiveHitRateLabel => $"{Math.Clamp(_last.CacheEffectiveHitRate, 0, 1) * 100:0}%";
     public string CacheStaleHitsLabel => _last.CacheStaleHits.ToString();
     public string CacheSizeLabel => Human.Bytes(_last.CacheBytes);
+    public string ClientsActiveLabel => _last.ClientsActive.ToString();
+    public string ClientsSeenLabel => _last.ClientsTotalSeen.ToString();
     public string EndpointLabel => _last.Endpoints > 0
         ? $"{_last.EndpointsHealthy}/{_last.Endpoints}"
         : "--";
@@ -463,11 +763,22 @@ public class MainViewModel : ObservableBase
         _last = s;
         UpdateSessionMetrics(s);
         UpdateTrends(s);
+        RuntimeGuardTune(s);
         RelayDetails.Clear();
         if (s.EndpointsDetail != null)
         {
             foreach (var ep in s.EndpointsDetail.OrderByDescending(x => x.SuccessRate).ThenBy(x => x.LatencyMs))
                 RelayDetails.Add(ep);
+        }
+        ClientConnections.Clear();
+        if (s.ClientsDetail != null)
+        {
+            foreach (var c in s.ClientsDetail
+                .OrderByDescending(x => x.Active)
+                .ThenByDescending(x => x.LastSeen))
+            {
+                ClientConnections.Add(c);
+            }
         }
         foreach (var n in new[]
         {
@@ -481,12 +792,57 @@ public class MainViewModel : ObservableBase
             nameof(SessionAvgLatencyLabel), nameof(SessionAvgRpsLabel),
             nameof(SessionAvgSuccessLabel),
             nameof(CacheHitRateLabel), nameof(CacheEffectiveHitRateLabel), nameof(CacheStaleHitsLabel), nameof(CacheSizeLabel),
+            nameof(ClientsActiveLabel), nameof(ClientsSeenLabel),
             nameof(EndpointLabel), nameof(ActiveEndpointLabel),
             nameof(QuickHealthGradeLabel), nameof(TopFailingHostLabel),
             nameof(RelayRoutingLabel), nameof(ConfiguredRelaysCountLabel),
             nameof(EnabledRelaysCountLabel),
             nameof(ThroughputTrendLabel), nameof(LatencyTrendLabel),
         }) Raise(n);
+    }
+
+    void RuntimeGuardTune(StatsSnapshot s)
+    {
+        if (!IsRunning) return;
+        var now = DateTime.UtcNow;
+        if ((now - _lastRuntimeGuardAt).TotalSeconds < 14) return;
+        _lastRuntimeGuardAt = now;
+
+            var changed = false;
+            var success = Math.Min(Math.Clamp(s.SuccessRate, 0, 1), Math.Clamp(s.WindowSuccessRate, 0, 1));
+            var highErrorPressure = s.WindowRequests >= 10 && s.WindowErrors >= 4;
+            var highLatency = s.LatencyMs > 2500;
+
+        if (success < 0.92 || highErrorPressure || highLatency)
+        {
+            if (MultiIdStrategy != "fair_spread") { MultiIdStrategy = "fair_spread"; changed = true; }
+            if (MultiIdFailThreshold > 2) { MultiIdFailThreshold = 2; changed = true; }
+            if (MultiIdCooldownSeconds > 20) { MultiIdCooldownSeconds = 20; changed = true; }
+            if (MultiIdMaxConsecutive > 1) { MultiIdMaxConsecutive = 1; changed = true; }
+            var maxParallelCap = ActivePreset == "god" ? 4 : 3;
+            if (MaxParallel > maxParallelCap) { MaxParallel = maxParallelCap; changed = true; }
+            if (FragmentSize > 16384) { FragmentSize = 16384; changed = true; }
+            if (!CacheEnabled) { CacheEnabled = true; changed = true; }
+            if (CacheStaleIfErrorS < 240) { CacheStaleIfErrorS = 240; changed = true; }
+            var cacheFloor = ActivePreset == "god" ? 224 : 160;
+            if (CacheMaxMb < cacheFloor) { CacheMaxMb = cacheFloor; changed = true; }
+            if (!AutoGoogleIpRefresh) { AutoGoogleIpRefresh = true; changed = true; }
+        }
+        else if (success >= 0.985 && s.LatencyMs > 0 && s.LatencyMs < 1200 && s.RequestsPerSec > 0.4)
+        {
+            var targetParallel = ActivePreset == "god" ? 5 : 4;
+            var targetChunk = ActivePreset == "god" ? 224 * 1024 : 192 * 1024;
+            var targetCache = ActivePreset == "god" ? 224 : 160;
+            if (MaxParallel < targetParallel) { MaxParallel = targetParallel; changed = true; }
+            if (ChunkSize < targetChunk) { ChunkSize = targetChunk; changed = true; }
+            if (CacheMaxMb < targetCache) { CacheMaxMb = targetCache; changed = true; }
+        }
+
+        if (!changed) return;
+        ClampNetworkKnobs();
+        SaveConfigSafe("runtime_guard");
+        AddLog(LogLevel.Info, "runtime_guard",
+            $"adaptive tuning applied: ok={success * 100:0}% lat={s.LatencyMs:0}ms err={s.WindowErrors}/{s.WindowRequests}");
     }
 
     void OnHealthChecked(HealthCheckResult result)
@@ -497,9 +853,56 @@ public class MainViewModel : ObservableBase
             ? $"{Loc["diag_proxy_reachable"]} ({result.LatencyMs:0} ms)"
             : $"{Loc["diag_proxy_unreachable"]}: {result.Message}";
 
+        _ = WatchdogTickAsync(result);
+
         Raise(nameof(LastCheckLabel));
         Raise(nameof(LatencyLabel));
         Raise(nameof(Diagnostics));
+    }
+
+    async Task WatchdogTickAsync(HealthCheckResult health)
+    {
+        if (!WatchdogEnabled || !IsRunning) return;
+        if (_watchdogRestarting) return;
+
+        var now = DateTime.UtcNow;
+        if (health.Reachable && _last.Health != "down")
+        {
+            _lastWatchdogSignalAt = now;
+            _watchdogFailureStreak = 0;
+            return;
+        }
+
+        _watchdogFailureStreak++;
+        var sinceGood = _lastWatchdogSignalAt == DateTime.MinValue
+            ? TimeSpan.FromSeconds(999)
+            : (now - _lastWatchdogSignalAt);
+        if (_watchdogFailureStreak < Math.Max(1, WatchdogFailureThreshold) && sinceGood.TotalSeconds < 45)
+            return;
+        if ((now - _lastWatchdogRestartAt).TotalSeconds < Math.Max(10, WatchdogCooldownS))
+            return;
+
+        _watchdogRestarting = true;
+        _lastWatchdogRestartAt = now;
+        try
+        {
+            AddLog(LogLevel.Warning, "watchdog",
+                $"Health watchdog restarting core (streak={_watchdogFailureStreak}, health={_last.Health}, reachable={health.Reachable})");
+            _autoTuner.Stop();
+            await _core.StopAsync(TimeSpan.FromSeconds(5));
+            await Task.Delay(400);
+            _core.Start();
+            if (ActivePreset == "auto") _autoTuner.Start();
+            _watchdogFailureStreak = 0;
+        }
+        catch (Exception ex)
+        {
+            AddLog(LogLevel.Error, "watchdog", "Watchdog restart failed: " + ex.Message);
+        }
+        finally
+        {
+            _watchdogRestarting = false;
+        }
     }
 
     LogLevel _minLevel = LogLevel.Info;
@@ -576,6 +979,7 @@ public class MainViewModel : ObservableBase
     public RelayCommand CopyRelayStatusCmd { get; }
     public RelayCommand CopyRuntimeSnapshotCmd { get; }
     public RelayCommand AnalyzeAndRecommendCmd { get; }
+    public RelayCommand ResetSystemStateCmd { get; }
     public RelayCommand ToggleLanguageCmd { get; }
     public RelayCommand AddDeploymentCmd { get; }
     public RelayCommand RemoveDeploymentCmd { get; }
@@ -592,6 +996,59 @@ public class MainViewModel : ObservableBase
         Raise(nameof(HealthLabel));
         Raise(nameof(LastCheckLabel));
         Raise(nameof(Diagnostics));
+    }
+
+    async Task ResetSystemStateAsync()
+    {
+        var ask = MessageBox.Show(
+            "Reset runtime system state and restart engine?\n\nThis clears runtime cache, relay health windows, counters, and session stats.",
+            "Reset System State",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (ask != MessageBoxResult.Yes) return;
+
+        try
+        {
+            Busy = true;
+            var wasRunning = IsRunning || IsConnecting;
+            _autoTuner.Stop();
+            _hostErrorCounts.Clear();
+            Logs.Clear();
+            RelayDetails.Clear();
+            _last = new StatsSnapshot();
+            ResetRuntimeSession();
+            Raise(nameof(TopFailingHostLabel));
+            Raise(nameof(QuickHealthGradeLabel));
+            Raise(nameof(CacheHitRateLabel));
+            Raise(nameof(CacheEffectiveHitRateLabel));
+            Raise(nameof(CacheStaleHitsLabel));
+            Raise(nameof(CacheSizeLabel));
+            Raise(nameof(SuccessRateLabel));
+            Raise(nameof(WindowSuccessRateLabel));
+            Raise(nameof(WindowErrorsLabel));
+            Raise(nameof(WindowRequestsLabel));
+            Raise(nameof(RequestsPerSecLabel));
+            Raise(nameof(LatencyLabel));
+
+            if (wasRunning)
+            {
+                await _core.StopAsync(TimeSpan.FromSeconds(4));
+                await Task.Delay(250);
+                _core.Start();
+                if (ActivePreset == "auto") _autoTuner.Start();
+            }
+
+            AddLog(LogLevel.Info, "reset", "System state reset completed.");
+        }
+        catch (Exception ex)
+        {
+            AddLog(LogLevel.Error, "reset", "Reset failed: " + ex.Message);
+        }
+        finally
+        {
+            Busy = false;
+            RefreshCommands();
+        }
     }
 
     // Deployment IDs
@@ -672,10 +1129,58 @@ public class MainViewModel : ObservableBase
         _cfg.ScriptIds = relayItems.Where(x => x.Enabled).Select(x => x.Id).ToList();
         // Keep `script_id` in sync for back-compat: first non-empty entry.
         _cfg.ScriptId = _cfg.ScriptIds.Count > 0 ? _cfg.ScriptIds[0] : "";
+        var bypass = (_cfg.DirectBypassDomains ?? new List<string>())
+            .Select(NormalizeHostRule)
+            .Where(x => x.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        _cfg.BypassHosts = bypass;
+        _cfg.NoMitmHosts = (_cfg.NoMitmHosts ?? new List<string>())
+            .Select(NormalizeHostRuleKeepWildcard)
+            .Where(x => x.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        _cfg.NoMitmCidrs = (_cfg.NoMitmCidrs ?? new List<string>())
+            .Select(x => (x ?? "").Trim())
+            .Where(x => x.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        _cfg.ForceRelayHosts = (_cfg.ForceRelayHosts ?? new List<string>())
+            .Select(NormalizeHostRule)
+            .Where(x => x.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var profileMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var h in _cfg.BypassHosts) profileMap[h] = "direct-bypass";
+        foreach (var h in _cfg.NoMitmHosts) profileMap[h] = "no-mitm";
+        foreach (var h in _cfg.ForceRelayHosts) profileMap[h] = "force-relay";
+        _cfg.DomainRoutingProfiles = profileMap;
         SaveConfigSafe("deployments");
         Raise(nameof(ConfiguredRelaysCountLabel));
         Raise(nameof(EnabledRelaysCountLabel));
         Raise(nameof(ConfiguredRelaysPreview));
+    }
+
+    static string NormalizeHostRule(string raw)
+    {
+        var host = (raw ?? "").Trim().ToLowerInvariant();
+        if (host.StartsWith("http://")) host = host.Substring("http://".Length);
+        if (host.StartsWith("https://")) host = host.Substring("https://".Length);
+        var slash = host.IndexOf('/');
+        if (slash >= 0) host = host.Substring(0, slash);
+        return host.Trim('.').Trim();
+    }
+
+    static string NormalizeHostRuleKeepWildcard(string raw)
+    {
+        var host = (raw ?? "").Trim().ToLowerInvariant();
+        var keepSuffixRule = host.StartsWith(".");
+        if (host.StartsWith("http://")) host = host.Substring("http://".Length);
+        if (host.StartsWith("https://")) host = host.Substring("https://".Length);
+        var slash = host.IndexOf('/');
+        if (slash >= 0) host = host.Substring(0, slash);
+        host = keepSuffixRule ? "." + host.Trim('.').Trim() : host.Trim('.').Trim();
+        return host == "." ? "" : host;
     }
 
     // Presets
@@ -684,6 +1189,8 @@ public class MainViewModel : ObservableBase
         if (string.IsNullOrEmpty(key)) return;
         var p = Presets.ByKey(key!);
         Presets.ApplyTo(_cfg, p);
+        if (string.Equals(p.Key, "god", StringComparison.OrdinalIgnoreCase))
+            ApplyGodModeKnobs();
         RaiseAllConfigProps();
         AddLog(LogLevel.Info, "preset", $"applied {p.Key}");
     }
@@ -760,6 +1267,8 @@ public class MainViewModel : ObservableBase
         try
         {
             ClampNetworkKnobs();
+            if (SafeDefaultsLock)
+                ApplySafeDefaultsLock();
             PersistDeployments();
             SaveConfigSafe("settings");
             AddLog(LogLevel.Info, "config", "Settings saved.");
@@ -771,6 +1280,7 @@ public class MainViewModel : ObservableBase
 
     void ClampNetworkKnobs()
     {
+        NormalizeListenHostAndLanSharing();
         if (FragmentSize < 1024)  FragmentSize = 1024;
         if (FragmentSize > 65536) FragmentSize = 65536;
         if (ChunkSize < 16384)    ChunkSize = 16384;
@@ -786,15 +1296,111 @@ public class MainViewModel : ObservableBase
         if (RelayCbThreshold > 10) RelayCbThreshold = 10;
         if (RelayCbCooldown < 5) RelayCbCooldown = 5;
         if (RelayCbCooldown > 180) RelayCbCooldown = 180;
+        if (RelayTimeout < 8) RelayTimeout = 8;
+        if (RelayTimeout > 120) RelayTimeout = 120;
+        if (ScriptBlacklistTtlS < 30) ScriptBlacklistTtlS = 30;
+        if (ScriptBlacklistTtlS > 1800) ScriptBlacklistTtlS = 1800;
+        if (RetrySafeAttempts < 1) RetrySafeAttempts = 1;
+        if (RetrySafeAttempts > 4) RetrySafeAttempts = 4;
+        if (RetryBackoffBaseMs < 20) RetryBackoffBaseMs = 20;
+        if (RetryBackoffBaseMs > 2500) RetryBackoffBaseMs = 2500;
+        if (GoogleIpRefreshIntervalS < 60) GoogleIpRefreshIntervalS = 60;
+        if (GoogleIpRefreshIntervalS > 3600) GoogleIpRefreshIntervalS = 3600;
+        if (GoogleIpProbeTimeoutS < 1) GoogleIpProbeTimeoutS = 1;
+        if (GoogleIpProbeTimeoutS > 10) GoogleIpProbeTimeoutS = 10;
+        if (GoogleIpProbeSampleSize < 3) GoogleIpProbeSampleSize = 3;
+        if (GoogleIpProbeSampleSize > 30) GoogleIpProbeSampleSize = 30;
+        if (GoogleIpSwitchMinImprovementMs < 0) GoogleIpSwitchMinImprovementMs = 0;
+        if (GoogleIpSwitchMinImprovementMs > 2000) GoogleIpSwitchMinImprovementMs = 2000;
         if (MultiIdFailThreshold < 1) MultiIdFailThreshold = 1;
         if (MultiIdFailThreshold > 20) MultiIdFailThreshold = 20;
         if (MultiIdCooldownSeconds < 5) MultiIdCooldownSeconds = 5;
         if (MultiIdCooldownSeconds > 600) MultiIdCooldownSeconds = 600;
         if (MultiIdMaxConsecutive < 1) MultiIdMaxConsecutive = 1;
         if (MultiIdMaxConsecutive > 20) MultiIdMaxConsecutive = 20;
+        if (TcpSendBuffer < 16384) TcpSendBuffer = 16384;
+        if (TcpSendBuffer > 4 * 1024 * 1024) TcpSendBuffer = 4 * 1024 * 1024;
+        if (TcpRecvBuffer < 16384) TcpRecvBuffer = 16384;
+        if (TcpRecvBuffer > 4 * 1024 * 1024) TcpRecvBuffer = 4 * 1024 * 1024;
+        if (HalfOpenRxTimeoutS < 5) HalfOpenRxTimeoutS = 5;
+        if (HalfOpenRxTimeoutS > 180) HalfOpenRxTimeoutS = 180;
+        if (HalfOpenProbeTimeoutS < 0.5) HalfOpenProbeTimeoutS = 0.5;
+        if (HalfOpenProbeTimeoutS > 10.0) HalfOpenProbeTimeoutS = 10.0;
+        if (DcFailoverAttempts < 1) DcFailoverAttempts = 1;
+        if (DcFailoverAttempts > 6) DcFailoverAttempts = 6;
         if (string.IsNullOrWhiteSpace(MultiIdStrategy))
             MultiIdStrategy = "balanced";
         Raise(nameof(RelayRoutingLabel));
+    }
+
+    void NormalizeListenHostAndLanSharing()
+    {
+        var host = (ListenHost ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            if (AllowLan) host = "0.0.0.0";
+            else host = "127.0.0.1";
+        }
+        else if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            host = "127.0.0.1";
+        }
+
+        if (AllowLan)
+        {
+            if (host == "127.0.0.1" || host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+                host = "0.0.0.0";
+        }
+        else
+        {
+            if (host == "0.0.0.0" || host == "::")
+                host = "127.0.0.1";
+        }
+
+        _cfg.ListenHost = host;
+        _cfg.LanSharing = host == "0.0.0.0" || host == "::";
+        Raise(nameof(ListenHost));
+        Raise(nameof(AllowLan));
+    }
+
+    void ApplyGodModeKnobs()
+    {
+        EnableHttp2 = false;
+        EnableChunked = true;
+        VerifySsl = true;
+
+        FragmentSize = 12 * 1024;
+        ChunkSize = 224 * 1024;
+        MaxParallel = 5;
+
+        CacheEnabled = true;
+        CacheMaxMb = Math.Max(CacheMaxMb, 224);
+        CacheDefaultTtlS = Math.Max(CacheDefaultTtlS, 1200);
+        CacheStaleIfErrorS = Math.Max(CacheStaleIfErrorS, 300);
+
+        MultiIdStrategy = "fair_spread";
+        MultiIdFailThreshold = 2;
+        MultiIdCooldownSeconds = 20;
+        MultiIdMaxConsecutive = 1;
+
+        RelayCbThreshold = 3;
+        RelayCbCooldown = 24;
+        RelayTimeout = Math.Max(RelayTimeout, 35);
+        ScriptBlacklistTtlS = 240;
+        RetrySafeAttempts = Math.Max(RetrySafeAttempts, 2);
+        RetryBackoffBaseMs = 140;
+
+        AutoGoogleIpRefresh = true;
+        GoogleIpRefreshIntervalS = 420;
+        GoogleIpProbeTimeoutS = 3;
+        GoogleIpProbeSampleSize = 10;
+        GoogleIpSwitchMinImprovementMs = 90;
+
+        if (!string.IsNullOrWhiteSpace(CustomSni) &&
+            !CustomSni.Equals("www.google.com", StringComparison.OrdinalIgnoreCase))
+        {
+            CustomSni = "";
+        }
     }
 
     async Task InstallCertAsync()
@@ -941,6 +1547,7 @@ public class MainViewModel : ObservableBase
 
             var payload = new
             {
+                analyzer = BuildAnalyzerReport(includeActions: false),
                 generated_at = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
                 app_version = AppVersionLabel,
                 mode = Mode,
@@ -995,126 +1602,8 @@ public class MainViewModel : ObservableBase
 
     void AnalyzeAndRecommend()
     {
-        var findings = new List<string>();
-        var relayNotes = new List<string>();
-        var apply = new List<Action>();
-        var appliedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        void AddFix(string key, Action action)
-        {
-            if (appliedKeys.Add(key)) apply.Add(action);
-        }
-        void AddFinding(string sev, string area, string msg)
-            => findings.Add($"- [{sev}] {area}: {msg}");
-
-        var enabledRelayCount = _cfg.ScriptIds?.Count ?? 0;
-        var unhealthyRelays = RelayDetails
-            .Where(r => (r.Window1M.Total >= 10 && r.Window1M.SuccessRate < 0.80) || r.RecentFailures >= 3 || r.Parked)
-            .OrderBy(r => r.Window1M.SuccessRate)
-            .ThenByDescending(r => r.RecentFailures)
-            .ToList();
-        var totalUses = RelayDetails.Sum(r => Math.Max(0, r.Uses));
-        var dominantRelay = totalUses > 0
-            ? RelayDetails.OrderByDescending(r => r.Uses).FirstOrDefault()
-            : null;
-        var dominanceRatio = (dominantRelay != null && totalUses > 0)
-            ? (double)dominantRelay.Uses / totalUses
-            : 0.0;
-        var windowErrorRate = _last.WindowRequests > 0
-            ? (double)_last.WindowErrors / _last.WindowRequests
-            : 0.0;
-
-        if (!SysProxyOn)
-            AddFinding("INFO", "Routing", "System proxy is OFF (Firefox/manual proxy mode is expected).");
-        if (!CertInstallService.CertExists() || !CertInstallService.IsTrusted())
-        {
-            AddFinding("HIGH", "TLS", "CA certificate is missing/untrusted; HTTPS interception may fail.");
-        }
-        if (!VerifySsl)
-        {
-            AddFinding("HIGH", "Security", "verify_ssl is OFF; enable it to avoid silent upstream TLS downgrade risks.");
-            AddFix("verify_ssl_on", () => VerifySsl = true);
-        }
-        if (!string.IsNullOrWhiteSpace(CustomSni) && !CustomSni.Equals("www.google.com", StringComparison.OrdinalIgnoreCase))
-        {
-            AddFinding("MED", "SNI", $"Custom SNI is set to '{CustomSni}', which can break some CDNs/apps.");
-            AddFix("custom_sni_clear", () => CustomSni = "");
-        }
-        if (enabledRelayCount < 3)
-            AddFinding("MED", "Capacity", "Fewer than 3 enabled relays; balancing headroom is limited.");
-
-        if (_last.SuccessRate < 0.85 || windowErrorRate > 0.18)
-        {
-            AddFinding("HIGH", "Reliability",
-                $"Success {_last.SuccessRate * 100:0.#}% and window error rate {windowErrorRate * 100:0.#}% indicate instability.");
-            AddFix("fail_threshold", () => MultiIdFailThreshold = Math.Clamp(MultiIdFailThreshold, 1, 2));
-            AddFix("cooldown_up", () => MultiIdCooldownSeconds = Math.Max(MultiIdCooldownSeconds, 120));
-            AddFix("strategy_spread", () => MultiIdStrategy = "fair_spread");
-        }
-
-        if ((_last.LatencyMs > 2200 || _probeLatencyMs > 2200) && MaxParallel > 2)
-        {
-            AddFinding("MED", "Latency", "High latency detected while parallelism is high.");
-            AddFix("max_parallel_2", () => MaxParallel = 2);
-        }
-        if (_last.LatencyMs < 1200 && _last.SuccessRate > 0.96 && MaxParallel < 4)
-        {
-            AddFinding("LOW", "Throughput", "Network is healthy; a little more parallelism can improve page load speed.");
-            AddFix("max_parallel_4", () => MaxParallel = Math.Max(MaxParallel, 4));
-        }
-        if (_last.LatencyMs > 3500 && FragmentSize > 8192)
-        {
-            AddFinding("MED", "Network", "Very high latency; smaller TLS fragment often improves hostile-network behavior.");
-            AddFix("fragment_8192", () => FragmentSize = 8192);
-        }
-        if (_last.LatencyMs > 2500)
-            AddFinding("INFO", "Path quality", "Run a Google IP scan and switch to a lower-latency front IP if available.");
-
-        if (!CacheEnabled)
-        {
-            AddFinding("MED", "Cache", "Cache is disabled; repeated requests cannot reuse responses.");
-            AddFix("cache_on", () => CacheEnabled = true);
-        }
-        else if (_last.CacheHitRate < 0.35)
-        {
-            AddFinding("LOW", "Cache", $"Cache hit rate is low ({CacheHitRateLabel}); TTL tuning may help.");
-            AddFix("cache_ttl", () => CacheDefaultTtlS = Math.Max(CacheDefaultTtlS, 900));
-            AddFix("cache_stale", () => CacheStaleIfErrorS = Math.Max(CacheStaleIfErrorS, 180));
-        }
-        if (CacheEnabled && CacheMaxMb < 96)
-        {
-            AddFinding("LOW", "Cache", "Cache size is small; increasing cache budget can improve repeat-load performance.");
-            AddFix("cache_size_96", () => CacheMaxMb = Math.Max(CacheMaxMb, 96));
-        }
-
-        if (RelayCbThreshold > 3)
-        {
-            AddFinding("LOW", "Circuit-breaker", "Per-host relay breaker reacts slowly; reducing threshold cuts repeated timeout stalls.");
-            AddFix("relay_cb_threshold", () => RelayCbThreshold = 3);
-        }
-        if (RelayCbCooldown < 20)
-        {
-            AddFinding("LOW", "Circuit-breaker", "Cooldown is short; slightly longer cooldown reduces immediate re-fail loops.");
-            AddFix("relay_cb_cooldown", () => RelayCbCooldown = 20);
-        }
-
-        if (dominanceRatio > 0.70 && RelayDetails.Count >= 3)
-        {
-            AddFinding("MED", "Load-balance",
-                $"Relay {ShortRelayId(dominantRelay?.Id ?? "")} carries {dominanceRatio * 100:0.#}% of dispatcher uses.");
-            AddFix("max_consecutive", () => MultiIdMaxConsecutive = Math.Min(MultiIdMaxConsecutive, 2));
-            AddFix("strategy_fair", () => MultiIdStrategy = "fair_spread");
-        }
-
-        foreach (var relay in unhealthyRelays.Take(4))
-        {
-            relayNotes.Add(
-                $"- Relay {ShortRelayId(relay.Id)} | uses {relay.Uses} | " +
-                $"1m success {(relay.Window1M.SuccessRate * 100):0.#}% ({relay.Window1M.Ok}/{relay.Window1M.Total}) | " +
-                $"fails {relay.RecentFailures} | parked {(relay.Parked ? $"yes {relay.ParkedForS}s" : "no")} | " +
-                $"latency {(relay.LatencyMs > 0 ? relay.LatencyMs.ToString("0") : "--")} ms");
-        }
-
-        if (findings.Count == 0)
+        var report = BuildAnalyzerReport(includeActions: true);
+        if (report.Findings.Count == 0 && report.Actions.Count == 0)
         {
             MessageBox.Show(
                 "Current state looks healthy. No automatic changes are recommended right now.",
@@ -1124,9 +1613,18 @@ public class MainViewModel : ObservableBase
             return;
         }
 
+        var findingsText = report.Findings
+            .OrderByDescending(f => f.Weight)
+            .ThenBy(f => f.Area)
+            .Select(f => $"- [{f.Severity}] {f.Area}: {f.Message}");
+        var actionText = report.Actions.Take(10).Select(a => $"- {a.Label}");
+
         var msg = "System analysis summary:\n\n"
-            + string.Join("\n", findings)
-            + (relayNotes.Count > 0 ? "\n\nRelay risk details:\n" + string.Join("\n", relayNotes) : "")
+            + $"Risk grade: {report.Grade} ({report.RiskScore}/100)\n"
+            + $"Primary cause: {report.PrimaryCause}\n\n"
+            + string.Join("\n", findingsText)
+            + (report.RelayNotes.Count > 0 ? "\n\nRelay risk details:\n" + string.Join("\n", report.RelayNotes) : "")
+            + (report.Actions.Count > 0 ? "\n\nPlanned safe auto-fixes:\n" + string.Join("\n", actionText) : "")
             + "\n\nObserved metrics:"
             + $"\n- Success rate: {SuccessRateLabel}"
             + $"\n- Window success: {WindowSuccessRateLabel} ({WindowRequestsLabel} req, {WindowErrorsLabel} errors)"
@@ -1138,11 +1636,12 @@ public class MainViewModel : ObservableBase
         var choice = MessageBox.Show(msg, "Analyzer", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (choice != MessageBoxResult.Yes) return;
 
-        foreach (var action in apply) action();
+        foreach (var action in report.Actions) action.Apply();
         ClampNetworkKnobs();
         SaveConfigSafe("analyzer");
         RaiseAllConfigProps();
-        AddLog(LogLevel.Info, "analyzer", "Recommendations applied.");
+        AddLog(LogLevel.Info, "analyzer",
+            $"Applied {report.Actions.Count} recommendations | risk {report.RiskScore}/100 ({report.Grade}) | cause={report.PrimaryCause}");
     }
 
     void AddLog(LogLevel lvl, string src, string msg)
@@ -1166,6 +1665,229 @@ public class MainViewModel : ObservableBase
         while (Logs.Count > MaxLogLines) Logs.RemoveAt(0);
         TrackFailingHostFromLog(e);
         Raise(nameof(TopFailingHostLabel));
+    }
+
+    AnalyzerReport BuildAnalyzerReport(bool includeActions)
+    {
+        var report = new AnalyzerReport();
+        var appliedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void AddFinding(string severity, string area, string message, int weight)
+            => report.Findings.Add(new AnalyzerFinding(severity, area, message, weight));
+
+        void AddAction(string key, string label, Action apply)
+        {
+            if (!includeActions) return;
+            if (!appliedKeys.Add(key)) return;
+            report.Actions.Add(new AnalyzerAction(key, label, apply));
+        }
+
+        var enabledRelayCount = _cfg.ScriptIds?.Count ?? 0;
+        var windowErrorRate = _last.WindowRequests > 0
+            ? (double)_last.WindowErrors / _last.WindowRequests
+            : 0.0;
+        var unhealthyRelays = RelayDetails
+            .Where(r => (r.Window1M.Total >= 10 && r.Window1M.SuccessRate < 0.80) || r.RecentFailures >= 3 || r.Parked)
+            .OrderBy(r => r.Window1M.SuccessRate)
+            .ThenByDescending(r => r.RecentFailures)
+            .ToList();
+        var totalUses = RelayDetails.Sum(r => Math.Max(0, r.Uses));
+        var dominantRelay = totalUses > 0
+            ? RelayDetails.OrderByDescending(r => r.Uses).FirstOrDefault()
+            : null;
+        var dominanceRatio = (dominantRelay != null && totalUses > 0)
+            ? (double)dominantRelay.Uses / totalUses
+            : 0.0;
+        var parked = RelayDetails.Count(r => r.Parked);
+        var latency = _last.LatencyMs > 0 ? _last.LatencyMs : _probeLatencyMs;
+        var hasStrongSignal = _last.WindowRequests >= 12;
+
+        if (!CertInstallService.CertExists() || !CertInstallService.IsTrusted())
+            AddFinding("HIGH", "TLS", "CA certificate is missing/untrusted; HTTPS interception may fail.", 18);
+
+        if (!VerifySsl)
+        {
+            AddFinding("HIGH", "Security", "verify_ssl is OFF; upstream TLS downgrade risk is higher.", 16);
+            AddAction("verify_ssl_on", "Enable SSL verification", () => VerifySsl = true);
+        }
+
+        if (!string.IsNullOrWhiteSpace(CustomSni) &&
+            !CustomSni.Equals("www.google.com", StringComparison.OrdinalIgnoreCase))
+        {
+            AddFinding("MED", "SNI", $"Custom SNI is '{CustomSni}', which can break some CDNs/apps.", 9);
+            AddAction("custom_sni_clear", "Clear custom SNI", () => CustomSni = "");
+        }
+
+        if (enabledRelayCount < 3)
+            AddFinding("MED", "Capacity", "Fewer than 3 enabled relays; balancing headroom is limited.", 7);
+
+        if (_last.SuccessRate < 0.92 || windowErrorRate > 0.12 || (hasStrongSignal && _last.WindowErrors >= 4))
+        {
+            AddFinding(
+                "HIGH",
+                "Reliability",
+                $"Success {_last.SuccessRate * 100:0.#}% and window error rate {windowErrorRate * 100:0.#}% indicate instability.",
+                22
+            );
+            AddAction("fail_threshold", "Set relay fail threshold to 2", () => MultiIdFailThreshold = Math.Clamp(MultiIdFailThreshold, 1, 2));
+            AddAction("cooldown_to_20", "Set relay cooldown to 20s", () => MultiIdCooldownSeconds = 20);
+            AddAction("max_consecutive_1", "Limit max consecutive relay use to 1", () => MultiIdMaxConsecutive = 1);
+            AddAction("strategy_spread", "Use fair_spread relay strategy", () => MultiIdStrategy = "fair_spread");
+            AddAction("retry_safe_2", "Use 2 safe retries (GET/HEAD)", () => RetrySafeAttempts = Math.Max(2, RetrySafeAttempts));
+            AddAction("retry_backoff_140", "Set retry backoff base to 140ms", () => RetryBackoffBaseMs = 140);
+            AddAction("blacklist_240", "Set script blacklist TTL to 240s", () => ScriptBlacklistTtlS = 240);
+            AddAction("relay_timeout_35", "Set relay timeout to 35s", () => RelayTimeout = Math.Max(RelayTimeout, 35));
+            AddAction("preset_god_reliability", "Switch to God Mode profile", () =>
+            {
+                ActivePreset = "god";
+                ApplyGodModeKnobs();
+            });
+        }
+
+        if (latency > 2200)
+        {
+            AddFinding("MED", "Latency", $"Latency is high ({latency:0} ms).", 11);
+            AddAction("max_parallel_2", "Reduce max parallel to 2", () => MaxParallel = Math.Min(MaxParallel, 2));
+            AddAction("fragment_8k", "Use smaller fragment size (8KB)", () => FragmentSize = Math.Min(FragmentSize, 8192));
+            AddAction("auto_ip_refresh_on", "Enable auto Google IP refresh", () => AutoGoogleIpRefresh = true);
+            AddAction("ip_refresh_600", "Refresh Google IP every 600s", () => GoogleIpRefreshIntervalS = 600);
+            AddAction("ip_probe_timeout_3", "Set Google IP probe timeout to 3s", () => GoogleIpProbeTimeoutS = 3);
+            if (!string.Equals(ActivePreset, "god", StringComparison.OrdinalIgnoreCase))
+            {
+                AddAction("preset_god_latency", "Switch to God Mode profile", () =>
+                {
+                    ActivePreset = "god";
+                    ApplyGodModeKnobs();
+                });
+            }
+        }
+        else if (latency > 0 && latency < 1200 && _last.SuccessRate > 0.97 && _last.RequestsPerSec > 0.4)
+        {
+            AddFinding("LOW", "Throughput", "Network is healthy; can increase parallelism a bit.", 4);
+            AddAction("max_parallel_4", "Increase max parallel to 4", () => MaxParallel = Math.Max(MaxParallel, 4));
+        }
+
+        if (!CacheEnabled)
+        {
+            AddFinding("MED", "Cache", "Cache is disabled; repeated content cannot be reused.", 8);
+            AddAction("cache_on", "Enable cache", () => CacheEnabled = true);
+        }
+        else
+        {
+            if (_last.CacheHitRate < 0.30 && _last.Requests > 60)
+            {
+                AddFinding("LOW", "Cache", $"Cache hit rate is low ({CacheHitRateLabel}); TTL/capacity tuning may help.", 5);
+                AddAction("cache_ttl_900", "Set cache default TTL to 900s", () => CacheDefaultTtlS = Math.Max(CacheDefaultTtlS, 900));
+                AddAction("cache_stale_240", "Set stale-on-error to 240s", () => CacheStaleIfErrorS = Math.Max(CacheStaleIfErrorS, 240));
+            }
+            if (CacheMaxMb < 160)
+            {
+                AddFinding("LOW", "Cache", "Cache size is small for modern browsing sessions.", 4);
+                AddAction("cache_size_160", "Set cache size to 160MB", () => CacheMaxMb = Math.Max(CacheMaxMb, 160));
+            }
+        }
+
+        if (RelayCbThreshold > 3)
+        {
+            AddFinding("LOW", "Circuit-breaker", "Per-host relay breaker reacts slowly.", 4);
+            AddAction("relay_cb_threshold", "Set relay circuit threshold to 3", () => RelayCbThreshold = 3);
+        }
+        if (RelayCbCooldown < 20)
+        {
+            AddFinding("LOW", "Circuit-breaker", "Breaker cooldown is short; quick re-fail loops may happen.", 3);
+            AddAction("relay_cb_cooldown", "Set relay circuit cooldown to 20s", () => RelayCbCooldown = 20);
+        }
+
+        if (dominanceRatio > 0.70 && RelayDetails.Count >= 3)
+        {
+            AddFinding(
+                "MED",
+                "Load-balance",
+                $"Relay {ShortRelayId(dominantRelay?.Id ?? "")} handles {dominanceRatio * 100:0.#}% of uses.",
+                9
+            );
+            AddAction("strategy_fair", "Use fair_spread strategy", () => MultiIdStrategy = "fair_spread");
+            AddAction("max_consecutive_one", "Set max consecutive relay use to 1", () => MultiIdMaxConsecutive = 1);
+        }
+
+        if (parked > 0 && RelayDetails.Count > 0)
+            AddFinding("MED", "Relays", $"{parked}/{RelayDetails.Count} relays are currently parked.", 7);
+
+        if (!SysProxyOn)
+            AddFinding("INFO", "Routing", "System proxy is OFF (manual/browser-only mode expected).", 1);
+
+        var telegramHosts = (_cfg.NoMitmHosts ?? new List<string>())
+            .Select(x => x?.ToLowerInvariant() ?? "")
+            .Where(x => x.Length > 0)
+            .ToList();
+        var hasTelegramNoMitmHostRules = telegramHosts.Any(h =>
+            h == "telegram.org" || h == "t.me" ||
+            h.EndsWith(".telegram.org") || h.EndsWith(".t.me") ||
+            h.EndsWith(".telegram-cdn.org") || h.EndsWith(".telesco.pe") || h.EndsWith(".tdesktop.com"));
+        var hasTelegramNoMitmCidrs = (_cfg.NoMitmCidrs?.Count ?? 0) > 0;
+        if (!hasTelegramNoMitmHostRules || !hasTelegramNoMitmCidrs)
+        {
+            AddFinding("MED", "Telegram", "Telegram no-MITM host/CIDR coverage looks incomplete.", 9);
+            AddAction("telegram_no_mitm_seed", "Seed Telegram no-MITM host/CIDR defaults", () =>
+            {
+                _cfg.NoMitmHosts = new List<string>
+                {
+                    "telegram.org", ".telegram.org", "t.me", ".t.me",
+                    ".telegram-cdn.org", ".telesco.pe", ".tdesktop.com"
+                };
+                _cfg.NoMitmCidrs = new List<string>
+                {
+                    "149.154.160.0/20", "91.108.4.0/22", "91.108.8.0/22",
+                    "91.108.12.0/22", "91.108.16.0/22", "91.108.56.0/22"
+                };
+                Raise(nameof(NoMitmHostsText));
+                Raise(nameof(NoMitmCidrsText));
+            });
+        }
+        if (DcFailoverAttempts < 2)
+        {
+            AddFinding("LOW", "Telegram", "Telegram DC failover retries are conservative.", 4);
+            AddAction("telegram_failover_attempts", "Set Telegram DC failover attempts to 2", () => DcFailoverAttempts = 2);
+        }
+        if (HalfOpenRxTimeoutS > 40)
+        {
+            AddFinding("LOW", "Telegram", "Half-open timeout is long; Telegram recovery may be slow on bad links.", 3);
+            AddAction("telegram_half_open_rx", "Set half-open RX timeout to 20s", () => HalfOpenRxTimeoutS = 20);
+        }
+
+        if (_last.SuccessRate < 0.88 || windowErrorRate > 0.15 || (hasStrongSignal && _last.WindowErrors >= 5))
+            report.PrimaryCause = "Relay quality / endpoint instability";
+        else if (latency > 2200)
+            report.PrimaryCause = "Network path latency / front IP quality";
+        else if (dominanceRatio > 0.70)
+            report.PrimaryCause = "Relay load imbalance";
+        else if (!CacheEnabled || (_last.CacheHitRate < 0.25 && _last.Requests > 80))
+            report.PrimaryCause = "Low cache efficiency";
+        else
+            report.PrimaryCause = "Stable";
+
+        foreach (var relay in unhealthyRelays.Take(5))
+        {
+            report.RelayNotes.Add(
+                $"- Relay {ShortRelayId(relay.Id)} | uses {relay.Uses} | " +
+                $"1m success {(relay.Window1M.SuccessRate * 100):0.#}% ({relay.Window1M.Ok}/{relay.Window1M.Total}) | " +
+                $"fails {relay.RecentFailures} | parked {(relay.Parked ? $"yes {relay.ParkedForS}s" : "no")} | " +
+                $"latency {(relay.LatencyMs > 0 ? relay.LatencyMs.ToString("0") : "--")} ms");
+        }
+
+        report.RiskScore = Math.Clamp(report.Findings.Sum(f => f.Weight), 0, 100);
+        report.Grade = report.RiskScore switch
+        {
+            <= 10 => "A",
+            <= 22 => "B",
+            <= 40 => "C",
+            <= 60 => "D",
+            _ => "E",
+        };
+
+        report.Insights.Clear();
+        report.Insights.AddRange(BuildQuickInsights(report));
+        return report;
     }
 
     static readonly Regex _urlInParensRx = new(@"\((https?://[^)\s]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -1273,6 +1995,7 @@ public class MainViewModel : ObservableBase
 
     string BuildRelayStatusJson()
     {
+        var analyzer = BuildAnalyzerReport(includeActions: false);
         var rows = RelayDetails.Select(r => new
         {
             id = r.Id,
@@ -1353,8 +2076,11 @@ public class MainViewModel : ObservableBase
                 dominant_use_ratio = Math.Round(dominanceRatio, 4),
                 routing_balance = dominanceRatio > 0.70 ? "imbalanced" : (dominanceRatio > 0.50 ? "mixed" : "balanced"),
                 health_grade = _last.SuccessRate >= 0.95 ? "A" : (_last.SuccessRate >= 0.85 ? "B" : (_last.SuccessRate >= 0.70 ? "C" : "D")),
+                analyzer_risk_score = analyzer.RiskScore,
+                analyzer_grade = analyzer.Grade,
+                analyzer_primary_cause = analyzer.PrimaryCause,
             },
-            insights = BuildQuickInsights(),
+            insights = BuildQuickInsights(analyzer),
             relays = rows,
             recent_relay_logs = Logs
                 .Where(x => x.Source.Contains("multi", StringComparison.OrdinalIgnoreCase) || x.Source.Contains("relay", StringComparison.OrdinalIgnoreCase))
@@ -1372,6 +2098,7 @@ public class MainViewModel : ObservableBase
 
     string BuildSupportSummary()
     {
+        var analyzer = BuildAnalyzerReport(includeActions: false);
         var topFail = RelayDetails
             .OrderByDescending(r => r.RecentFailures)
             .ThenBy(r => r.Window1M.SuccessRate)
@@ -1397,7 +2124,10 @@ public class MainViewModel : ObservableBase
         sb.AppendLine($"Relays enabled/configured: {EnabledRelaysCountLabel}/{ConfiguredRelaysCountLabel}");
         sb.AppendLine($"Cache: {(CacheEnabled ? "Enabled" : "Disabled")} | hit {CacheHitRateLabel} | effective {CacheEffectiveHitRateLabel} | stale hits {CacheStaleHitsLabel} | size {CacheSizeLabel}");
         sb.AppendLine($"Bypass domains: {(_cfg.DirectBypassDomains?.Count ?? 0)}");
+        sb.AppendLine($"Telegram no-MITM hosts/CIDRs: {(_cfg.NoMitmHosts?.Count ?? 0)}/{(_cfg.NoMitmCidrs?.Count ?? 0)}");
         sb.AppendLine($"Runtime health grade: {(_last.SuccessRate >= 0.95 ? "A" : (_last.SuccessRate >= 0.85 ? "B" : (_last.SuccessRate >= 0.70 ? "C" : "D")))}");
+        sb.AppendLine($"Analyzer grade: {analyzer.Grade} ({analyzer.RiskScore}/100)");
+        sb.AppendLine($"Primary cause: {analyzer.PrimaryCause}");
         sb.AppendLine($"Window: success {WindowSuccessRateLabel}, requests {WindowRequestsLabel}, errors {WindowErrorsLabel}");
         sb.AppendLine($"Trend throughput: {ThroughputTrendLabel}");
         sb.AppendLine($"Trend latency: {LatencyTrendLabel}");
@@ -1406,7 +2136,7 @@ public class MainViewModel : ObservableBase
         if (topFail.Count > 0)
             sb.AppendLine("Relays to watch: " + string.Join(", ", topFail.Select(r =>
                 $"{ShortRelayId(r.Id)} ({r.RecentFailures} fails, 1m {(r.Window1M.SuccessRate * 100):0.#}%)")));
-        var insights = BuildQuickInsights();
+        var insights = BuildQuickInsights(analyzer);
         if (insights.Count > 0)
         {
             sb.AppendLine("Insights:");
@@ -1429,6 +2159,7 @@ public class MainViewModel : ObservableBase
 
     string BuildRuntimeSnapshotJson()
     {
+        var analyzer = BuildAnalyzerReport(includeActions: false);
         var relaySpread = RelayDetails
             .OrderByDescending(r => r.Uses)
             .Select(r => new { id = ShortRelayId(r.Id), uses = r.Uses })
@@ -1492,10 +2223,22 @@ public class MainViewModel : ObservableBase
                 cache_stale_if_error_s = CacheStaleIfErrorS,
                 relay_cb_threshold = RelayCbThreshold,
                 relay_cb_cooldown = RelayCbCooldown,
+                relay_timeout = RelayTimeout,
+                script_blacklist_ttl_s = ScriptBlacklistTtlS,
+                retry_safe_attempts = RetrySafeAttempts,
+                retry_backoff_base_ms = RetryBackoffBaseMs,
+                auto_google_ip_refresh = AutoGoogleIpRefresh,
+                google_ip_refresh_interval_s = GoogleIpRefreshIntervalS,
+                google_ip_probe_timeout_s = GoogleIpProbeTimeoutS,
+                google_ip_probe_sample_size = GoogleIpProbeSampleSize,
+                google_ip_switch_min_improvement_ms = GoogleIpSwitchMinImprovementMs,
             },
             analysis = new
             {
-                insights = BuildQuickInsights(),
+                analyzer_risk_score = analyzer.RiskScore,
+                analyzer_grade = analyzer.Grade,
+                analyzer_primary_cause = analyzer.PrimaryCause,
+                insights = BuildQuickInsights(analyzer),
                 throughput_trend = ThroughputTrendLabel,
                 latency_trend = LatencyTrendLabel,
                 relay_spread = relaySpread,
@@ -1522,9 +2265,22 @@ public class MainViewModel : ObservableBase
         });
     }
 
-    List<string> BuildQuickInsights()
+    List<string> BuildQuickInsights(AnalyzerReport? report = null)
     {
         var insights = new List<string>();
+        if (report != null)
+        {
+            insights.Add($"Analyzer risk: {report.RiskScore}/100 (grade {report.Grade})");
+            if (string.Equals(ActivePreset, "god", StringComparison.OrdinalIgnoreCase))
+                insights.Add("God Mode is active: aggressive-safe tuning profile is enabled.");
+            if (!string.IsNullOrWhiteSpace(report.PrimaryCause) &&
+                !report.PrimaryCause.Equals("Stable", StringComparison.OrdinalIgnoreCase))
+            {
+                insights.Add($"Primary bottleneck: {report.PrimaryCause}");
+            }
+            if (report.Actions.Count > 0)
+                insights.Add($"{report.Actions.Count} safe analyzer actions are ready to apply.");
+        }
         if (!SysProxyOn)
         {
             if (_core.IsRunning && _last.WindowRequests > 0)
@@ -1542,6 +2298,14 @@ public class MainViewModel : ObservableBase
             insights.Add($"Latency is high ({LatencyLabel}); reduce parallel load and verify front IP quality.");
         if (_last.LatencyMs > 2500)
             insights.Add("For best results, run Google IP scan and update `google_ip` to the fastest reachable candidate.");
+        if ((_cfg.NoMitmHosts?.Count ?? 0) == 0 || (_cfg.NoMitmCidrs?.Count ?? 0) == 0)
+            insights.Add("Telegram no-MITM coverage appears incomplete; add both Telegram hosts and CIDR ranges.");
+        else
+            insights.Add($"Telegram no-MITM profile is active ({_cfg.NoMitmHosts!.Count} hosts, {_cfg.NoMitmCidrs!.Count} CIDRs).");
+        if (DcFailoverAttempts < 2)
+            insights.Add("Telegram DC failover attempts are low; use at least 2 for unstable links.");
+        if (HalfOpenRxTimeoutS > 40)
+            insights.Add("Half-open timeout is high; Telegram reconnect can be delayed on congested networks.");
         if (!CacheEnabled) insights.Add("Cache is disabled; repeated content cannot be reused.");
         else if (_last.CacheHitRate < 0.35) insights.Add($"Cache effectiveness is low (hit {CacheHitRateLabel}); consider longer TTL.");
         var parked = RelayDetails.Count(r => r.Parked);

@@ -12,6 +12,7 @@ import asyncio
 import base64
 import codecs
 import hashlib
+import random
 import json
 import logging
 import re
@@ -47,6 +48,7 @@ from constants import (
     STATS_LOG_TOP_N,
     TLS_CONNECT_TIMEOUT,
     WARM_POOL_COUNT,
+    CANDIDATE_IPS,
 )
 
 log = logging.getLogger("Fronter")
@@ -139,6 +141,9 @@ class DomainFronter:
                                           len(self._script_ids)))
         self._sid_blacklist: dict[str, float] = {}
         self._blacklist_ttl = SCRIPT_BLACKLIST_TTL
+        self._blacklist_ttl = self._cfg_float(
+            config, "script_blacklist_ttl_s", self._blacklist_ttl, minimum=30.0,
+        )
 
         # Per-host stats (requests, cache hits, bytes, cumulative latency).
         self._per_site: dict[str, HostStat] = {}
@@ -157,6 +162,12 @@ class DomainFronter:
             config, "max_response_body_bytes", MAX_RESPONSE_BODY_BYTES,
             minimum=1024,
         )
+        self._retry_safe_attempts = self._cfg_int(
+            config, "retry_safe_attempts", 2, minimum=1,
+        )
+        self._retry_backoff_base_ms = self._cfg_int(
+            config, "retry_backoff_base_ms", 140, minimum=10,
+        )
 
         # Connection pool — TTL-based, pre-warmed, with concurrency control
         self._pool: list[tuple[asyncio.StreamReader, asyncio.StreamWriter, float]] = []
@@ -171,6 +182,20 @@ class DomainFronter:
         self._keepalive_task: asyncio.Task | None = None
         self._warm_task: asyncio.Task | None = None
         self._bg_tasks: set[asyncio.Task] = set()
+        self._google_ip_refresh_task: asyncio.Task | None = None
+        self._auto_google_ip_refresh = bool(config.get("auto_google_ip_refresh", True))
+        self._google_ip_refresh_interval = self._cfg_float(
+            config, "google_ip_refresh_interval_s", 600.0, minimum=60.0,
+        )
+        self._google_ip_probe_timeout = self._cfg_float(
+            config, "google_ip_probe_timeout_s", 3.0, minimum=0.8,
+        )
+        self._google_ip_probe_sample_size = self._cfg_int(
+            config, "google_ip_probe_sample_size", 8, minimum=3,
+        )
+        self._google_ip_switch_min_improvement_ms = self._cfg_int(
+            config, "google_ip_switch_min_improvement_ms", 120, minimum=0,
+        )
 
         # Batch collector for grouping concurrent relay() calls
         self._batch_lock = asyncio.Lock()
@@ -587,10 +612,21 @@ class DomainFronter:
                     key.append(f"{name}={value}")
         return "\n".join(key)
 
-    @classmethod
-    def _retry_attempts_for_payload(cls, payload: dict) -> int:
+    def _retry_attempts_for_payload(self, payload: dict) -> int:
         method = str(payload.get("m", "GET")).upper()
-        return 2 if method in cls._SAFE_RETRY_METHODS else 1
+        return self._retry_attempts_for_method(method)
+
+    def _retry_attempts_for_method(self, method: str) -> int:
+        if method in self._SAFE_RETRY_METHODS:
+            return max(1, self._retry_safe_attempts)
+        return 1
+
+    async def _retry_backoff(self, attempt_index: int) -> None:
+        base = max(10, int(self._retry_backoff_base_ms)) / 1000.0
+        factor = 2 ** max(0, int(attempt_index))
+        jitter = random.uniform(0.75, 1.35)
+        delay = min(1.2, base * factor * jitter)
+        await asyncio.sleep(delay)
 
     @staticmethod
     def _render_streaming_headers(resp_headers: dict, total_size: int) -> bytes:
@@ -706,6 +742,7 @@ class DomainFronter:
                             "H1 relay attempt %d failed (%s: %s), retrying",
                             attempt + 1, type(exc).__name__, exc,
                         )
+                        await self._retry_backoff(attempt)
                         await self._flush_pool()
                     else:
                         raise
@@ -931,6 +968,8 @@ class DomainFronter:
         # container never goes cold even when H2 is unavailable.  When H2 IS
         # active its _keepalive_loop skips the ping; they do not double-fire.
         self._spawn(self._h1_container_keepalive())
+        if self._auto_google_ip_refresh and self._google_ip_refresh_task is None:
+            self._google_ip_refresh_task = self._spawn(self._google_ip_refresh_loop())
 
     def _spawn(self, coro) -> asyncio.Task:
         """Create a task and keep a strong reference for clean cancellation."""
@@ -952,6 +991,7 @@ class DomainFronter:
         self._maintenance_task = None
         self._stats_task = None
         self._keepalive_task = None
+        self._google_ip_refresh_task = None
 
         await self._flush_pool()
 
@@ -1092,6 +1132,83 @@ class DomainFronter:
                 break
             except Exception as exc:
                 log.debug("H1 container keepalive failed: %s", exc)
+
+    async def _google_ip_refresh_loop(self):
+        """Periodically probe candidate front IPs and switch when significantly faster."""
+        await asyncio.sleep(30)
+        while True:
+            try:
+                await asyncio.sleep(self._google_ip_refresh_interval)
+                await self._refresh_google_ip_if_better()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.debug("google_ip refresh loop failed: %s", exc)
+
+    async def _refresh_google_ip_if_better(self):
+        current = (self.connect_host or "").strip()
+        if not current:
+            return
+
+        sample_size = max(3, int(self._google_ip_probe_sample_size))
+        probe_pool = list(CANDIDATE_IPS)
+        if current not in probe_pool:
+            probe_pool.insert(0, current)
+
+        deterministic = probe_pool[: max(1, min(4, sample_size // 2))]
+        remainder = [ip for ip in probe_pool if ip not in deterministic]
+        random.shuffle(remainder)
+        sample = deterministic + remainder[: max(0, sample_size - len(deterministic))]
+        sample = list(dict.fromkeys(sample))
+
+        try:
+            from google_ip_scanner import scan_fastest
+            results = await scan_fastest(
+                self.sni_host or "www.google.com",
+                timeout=self._google_ip_probe_timeout,
+                concurrency=min(6, max(2, len(sample))),
+                candidates=sample,
+            )
+        except Exception as exc:
+            log.debug("google_ip scan failed: %s", exc)
+            return
+
+        success = [r for r in results if r.ok]
+        if not success:
+            return
+
+        best = success[0]
+        current_result = next((r for r in success if r.ip == current), None)
+        if current_result is None:
+            current_result = best
+
+        curr_ms = current_result.latency_ms or 10_000
+        best_ms = best.latency_ms or 10_000
+        improvement = curr_ms - best_ms
+
+        if best.ip == current or improvement < self._google_ip_switch_min_improvement_ms:
+            return
+
+        old = self.connect_host
+        self.connect_host = best.ip
+        if self._h2 is not None:
+            self._h2.connect_host = best.ip
+
+        try:
+            await self._flush_pool()
+        except Exception:
+            pass
+
+        if self._h2 is not None:
+            try:
+                await self._h2.reconnect()
+            except Exception:
+                pass
+
+        log.info(
+            "google_ip auto-switch: %s (%sms) -> %s (%sms) [Δ=%sms]",
+            old, curr_ms, best.ip, best_ms, improvement,
+        )
 
     async def _do_warm(self):
         """Open WARM_POOL_COUNT connections in parallel — failures are fine."""
@@ -1932,6 +2049,7 @@ class DomainFronter:
                     self._record_h2_failure(e)
                     if attempt < attempts - 1:
                         log.debug("H2 relay failed (%s), reconnecting", e)
+                        await self._retry_backoff(attempt)
                         try:
                             await self._h2.reconnect()
                             # Do NOT record success here — only a successful relay
@@ -1961,6 +2079,7 @@ class DomainFronter:
                         log.debug("Relay attempt %d failed (%s: %s), retrying",
                                   attempt + 1,
                                   type(e).__name__, e)
+                        await self._retry_backoff(attempt)
                         await self._flush_pool()
                     else:
                         raise
@@ -2427,11 +2546,11 @@ class DomainFronter:
                        500: "Internal Server Error"}.get(status, "OK")
         result = f"HTTP/1.1 {status} {status_text}\r\n"
 
-        # Keep Content-Encoding as-is. Apps Script returns the upstream bytes
-        # unchanged, so stripping this header breaks compressed CSS/JS/fonts
-        # on sites like Instagram.
+        # UrlFetchApp may transparently decode compressed payload bytes while
+        # still surfacing the original response headers. Forwarding
+        # Content-Encoding in that case causes browser "Content Encoding Error".
         skip = {"transfer-encoding", "connection", "keep-alive",
-                "content-length"}
+                "content-length", "content-encoding"}
         for k, v in resp_headers.items():
             if k.lower() in skip:
                 continue

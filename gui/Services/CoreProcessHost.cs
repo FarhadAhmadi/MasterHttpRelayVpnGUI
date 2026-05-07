@@ -28,6 +28,52 @@ public class CoreProcessHost : IDisposable
 
     public bool CoreExeExists() => File.Exists(Paths.CoreExe);
 
+    public async Task<string?> ScanGoogleIpAsync(string frontDomain = "www.google.com")
+    {
+        if (!CoreExeExists()) return null;
+        var psi = new ProcessStartInfo
+        {
+            FileName = Paths.CoreExe,
+            Arguments = $"--config \"{Paths.ConfigFile}\" --scan",
+            WorkingDirectory = Path.GetDirectoryName(Paths.CoreExe)!,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+        psi.EnvironmentVariables["MRELAY_CA_DIR"] = Paths.CertDir;
+        if (!string.IsNullOrWhiteSpace(frontDomain))
+            psi.EnvironmentVariables["DFT_FRONT_DOMAIN"] = frontDomain;
+
+        try
+        {
+            using var p = Process.Start(psi);
+            if (p == null) return null;
+            var outputTask = p.StandardOutput.ReadToEndAsync();
+            var errTask = p.StandardError.ReadToEndAsync();
+            await Task.Run(() => p.WaitForExit(25000));
+            var output = await outputTask;
+            _ = await errTask;
+
+            var m = Regex.Match(
+                output ?? "",
+                "Recommended:\\s*Set\\s*\"google_ip\":\\s*\"(?<ip>[0-9.]+)\"",
+                RegexOptions.IgnoreCase
+            );
+            if (m.Success)
+                return m.Groups["ip"].Value;
+
+            m = Regex.Match(output ?? "", @"\b(?<ip>\d{1,3}(?:\.\d{1,3}){3})\b");
+            return m.Success ? m.Groups["ip"].Value : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public async Task<bool> GenerateCaAsync()
     {
         if (!CoreExeExists()) return false;

@@ -33,6 +33,7 @@ public class AppConfig
     };
 
     [JsonPropertyName("mode")]            public string Mode { get; set; } = "apps_script";
+    [JsonPropertyName("safe_defaults_lock")] public bool SafeDefaultsLock { get; set; } = true;
     [JsonPropertyName("google_ip")]       public string? GoogleIp { get; set; } = "216.239.38.120";
     [JsonPropertyName("front_domain")]    public string? FrontDomain { get; set; } = "www.google.com";
     [JsonPropertyName("custom_sni")]      public string? CustomSni { get; set; } = "";
@@ -46,19 +47,19 @@ public class AppConfig
         new RelayConfigItem { Id = DefaultRelayIds[1], Enabled = true },
         new RelayConfigItem { Id = DefaultRelayIds[2], Enabled = true },
         new RelayConfigItem { Id = DefaultRelayIds[3], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[4], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[5], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[6], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[7], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[8], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[9], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[10], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[11], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[12], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[13], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[14], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[15], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[16], Enabled = true },
+        new RelayConfigItem { Id = DefaultRelayIds[4], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[5], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[6], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[7], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[8], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[9], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[10], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[11], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[12], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[13], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[14], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[15], Enabled = false },
+        new RelayConfigItem { Id = DefaultRelayIds[16], Enabled = false },
         
     };
 
@@ -66,6 +67,7 @@ public class AppConfig
     [JsonPropertyName("custom_domain")]   public string? CustomDomain { get; set; }
     [JsonPropertyName("auth_key")]        public string AuthKey { get; set; } = "CHANGE_ME_TO_A_STRONG_SECRET";
     [JsonPropertyName("listen_host")]     public string ListenHost { get; set; } = "127.0.0.1";
+    [JsonPropertyName("lan_sharing")]     public bool LanSharing { get; set; } = false;
     [JsonPropertyName("listen_port")]     public int ListenPort { get; set; } = 8085;
     [JsonPropertyName("log_level")]       public string LogLevel { get; set; } = "INFO";
     [JsonPropertyName("verify_ssl")]      public bool VerifySsl { get; set; } = true;
@@ -73,29 +75,56 @@ public class AppConfig
     [JsonPropertyName("enable_http2")]    public bool EnableHttp2 { get; set; } = false;
     [JsonPropertyName("enable_chunked")]  public bool EnableChunked { get; set; } = true;
     [JsonPropertyName("chunk_size")]      public int ChunkSize { get; set; } = 131072;
-    [JsonPropertyName("max_parallel")]    public int MaxParallel { get; set; } = 2;
+    [JsonPropertyName("max_parallel")]    public int MaxParallel { get; set; } = 3;
     [JsonPropertyName("fragment_size")]   public int FragmentSize { get; set; } = 16384;
     [JsonPropertyName("cache_enabled")]   public bool CacheEnabled { get; set; } = true;
-    [JsonPropertyName("cache_max_mb")]    public int CacheMaxMb { get; set; } = 96;
+    [JsonPropertyName("cache_max_mb")]    public int CacheMaxMb { get; set; } = 160;
     [JsonPropertyName("cache_default_ttl_s")] public int CacheDefaultTtlS { get; set; } = 900;
-    [JsonPropertyName("cache_stale_if_error_s")] public int CacheStaleIfErrorS { get; set; } = 180;
+    [JsonPropertyName("cache_stale_if_error_s")] public int CacheStaleIfErrorS { get; set; } = 240;
     [JsonPropertyName("relay_cb_threshold")] public int RelayCbThreshold { get; set; } = 3;
     [JsonPropertyName("relay_cb_cooldown")] public int RelayCbCooldown { get; set; } = 20;
+    [JsonPropertyName("relay_timeout")]   public int RelayTimeout { get; set; } = 35;
+    [JsonPropertyName("script_blacklist_ttl_s")] public int ScriptBlacklistTtlS { get; set; } = 240;
+    [JsonPropertyName("retry_safe_attempts")] public int RetrySafeAttempts { get; set; } = 2;
+    [JsonPropertyName("retry_backoff_base_ms")] public int RetryBackoffBaseMs { get; set; } = 140;
+    [JsonPropertyName("auto_google_ip_refresh")] public bool AutoGoogleIpRefresh { get; set; } = true;
+    [JsonPropertyName("google_ip_refresh_interval_s")] public int GoogleIpRefreshIntervalS { get; set; } = 600;
+    [JsonPropertyName("google_ip_probe_timeout_s")] public int GoogleIpProbeTimeoutS { get; set; } = 3;
+    [JsonPropertyName("google_ip_probe_sample_size")] public int GoogleIpProbeSampleSize { get; set; } = 8;
+    [JsonPropertyName("google_ip_switch_min_improvement_ms")] public int GoogleIpSwitchMinImprovementMs { get; set; } = 120;
+    [JsonPropertyName("watchdog_enabled")] public bool WatchdogEnabled { get; set; } = true;
+    [JsonPropertyName("watchdog_failure_threshold")] public int WatchdogFailureThreshold { get; set; } = 4;
+    [JsonPropertyName("watchdog_cooldown_s")] public int WatchdogCooldownS { get; set; } = 45;
 
     // Multi-ID tuning
     [JsonPropertyName("multi_id_fail_threshold")]   public int MultiIdFailThreshold { get; set; } = 2;
-    [JsonPropertyName("multi_id_cooldown_seconds")] public int MultiIdCooldownSeconds { get; set; } = 120;
+    [JsonPropertyName("multi_id_cooldown_seconds")] public int MultiIdCooldownSeconds { get; set; } = 20;
     [JsonPropertyName("multi_id_strategy")]         public string MultiIdStrategy { get; set; } = "fair_spread";
-    [JsonPropertyName("multi_id_max_consecutive")]  public int MultiIdMaxConsecutive { get; set; } = 2;
+    [JsonPropertyName("multi_id_max_consecutive")]  public int MultiIdMaxConsecutive { get; set; } = 1;
 
     // GUI persistence
     [JsonPropertyName("language")]        public string Language { get; set; } = "en";   // "en" | "fa"
-    [JsonPropertyName("preset")]          public string Preset { get; set; } = "balanced"; // stealth|balanced|speed|auto
+    [JsonPropertyName("preset")]          public string Preset { get; set; } = "balanced"; // stealth|balanced|speed|god|auto
 
     [JsonPropertyName("first_run_done")]  public bool FirstRunDone { get; set; } = false;
 
     [JsonPropertyName("hosts")]           public Dictionary<string, string> Hosts { get; set; } = new();
     [JsonPropertyName("direct_bypass_domains")] public List<string> DirectBypassDomains { get; set; } = new();
+    [JsonPropertyName("bypass_hosts")] public List<string> BypassHosts { get; set; } = new();
+    [JsonPropertyName("no_mitm_hosts")] public List<string> NoMitmHosts { get; set; } = new();
+    [JsonPropertyName("no_mitm_cidrs")] public List<string> NoMitmCidrs { get; set; } = new();
+    [JsonPropertyName("tcp_send_buffer")] public int TcpSendBuffer { get; set; } = 262144;
+    [JsonPropertyName("tcp_recv_buffer")] public int TcpRecvBuffer { get; set; } = 262144;
+    [JsonPropertyName("half_open_rx_timeout_s")] public int HalfOpenRxTimeoutS { get; set; } = 20;
+    [JsonPropertyName("half_open_probe_timeout_s")] public double HalfOpenProbeTimeoutS { get; set; } = 2.0;
+    [JsonPropertyName("dc_failover_attempts")] public int DcFailoverAttempts { get; set; } = 2;
+    [JsonPropertyName("force_relay_hosts")] public List<string> ForceRelayHosts { get; set; } = new();
+    [JsonPropertyName("domain_routing_profiles")] public Dictionary<string, string> DomainRoutingProfiles { get; set; } = new();
+
+    [JsonPropertyName("update_channel")] public string UpdateChannel { get; set; } = "stable"; // stable|beta
+    [JsonPropertyName("auto_update_check")] public bool AutoUpdateCheck { get; set; } = true;
+    [JsonPropertyName("update_metadata_url")] public string? UpdateMetadataUrl { get; set; } = "";
+    [JsonPropertyName("update_public_key_pem")] public string? UpdatePublicKeyPem { get; set; } = "";
 
     [JsonExtensionData]
     public Dictionary<string, System.Text.Json.JsonElement>? Extra { get; set; }

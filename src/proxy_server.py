@@ -8,11 +8,14 @@ as JSON to script.google.com fronted through www.google.com).
 
 import asyncio
 import logging
+import random
 import re
 import socket
 import ssl
 import time
 import ipaddress
+from collections import OrderedDict
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 try:
@@ -44,6 +47,10 @@ from constants import (
 from domain_fronter import DomainFronter
 
 log = logging.getLogger("Proxy")
+try:
+    import stats as runtime_stats
+except Exception:
+    runtime_stats = None
 
 
 def _is_ip_literal(host: str) -> bool:
@@ -90,14 +97,26 @@ def _has_unsupported_transfer_encoding(header_block: bytes) -> bool:
 class ResponseCache:
     """Simple LRU response cache — avoids repeated relay calls."""
 
+    @dataclass
+    class CacheEntry:
+        raw: bytes
+        expires_at: float
+        stale_until: float
+        etag: str
+        last_modified: str
+        revalidating_until: float = 0.0
+        hits: int = 0
+
     def __init__(self, max_mb: int = 50):
-        # key -> (raw_response, expires_at)
-        self._store: dict[str, tuple[bytes, float]] = {}
+        # key -> CacheEntry
+        self._store: OrderedDict[str, ResponseCache.CacheEntry] = OrderedDict()
         self._size = 0
         self._max = max_mb * 1024 * 1024
         self.hits = 0
         self.misses = 0
+        self.stale_hits = 0
         self._last_prune = 0.0
+        self._revalidations = 0
 
     @staticmethod
     def _normalize_header_value(headers: dict | None, name: str) -> str:
@@ -118,23 +137,71 @@ class ResponseCache:
         return f"{url}\nA:{accept}\nAE:{accept_encoding}\nAL:{accept_language}"
 
     def get(self, key: str) -> bytes | None:
-        entry = self._store.get(key)
+        entry = self.get_entry(key)
         if not entry:
             self.misses += 1
             return None
-        raw, expires = entry
-        if time.time() > expires:
-            self._size -= len(raw)
-            del self._store[key]
+        if time.time() > entry.expires_at:
             self.misses += 1
             return None
         # Promote as most-recently used.
-        self._store.pop(key, None)
-        self._store[key] = (raw, expires)
+        self._store.move_to_end(key)
+        entry.hits += 1
         self.hits += 1
-        return raw
+        return entry.raw
 
-    def put(self, key: str, raw_response: bytes, ttl: int = 300):
+    def get_stale(self, key: str) -> bytes | None:
+        entry = self.get_entry(key)
+        if not entry:
+            return None
+        now = time.time()
+        if entry.expires_at < now <= entry.stale_until:
+            self._store.move_to_end(key)
+            entry.hits += 1
+            self.stale_hits += 1
+            return entry.raw
+        if now > entry.stale_until:
+            self._size -= len(entry.raw)
+            del self._store[key]
+        return None
+
+    def get_entry(self, key: str) -> CacheEntry | None:
+        entry = self._store.get(key)
+        if not entry:
+            return None
+        if time.time() > entry.stale_until:
+            self._size -= len(entry.raw)
+            del self._store[key]
+            return None
+        return entry
+
+    def can_background_revalidate(self, key: str, cooldown_s: int = 10) -> bool:
+        entry = self.get_entry(key)
+        if not entry:
+            return False
+        now = time.time()
+        if now <= entry.expires_at:
+            return False
+        if now > entry.stale_until:
+            return False
+        if now < entry.revalidating_until:
+            return False
+        entry.revalidating_until = now + max(1, cooldown_s)
+        self._revalidations += 1
+        return True
+
+    def conditional_headers(self, key: str) -> dict[str, str]:
+        entry = self.get_entry(key)
+        if not entry:
+            return {}
+        hdrs: dict[str, str] = {}
+        if entry.etag:
+            hdrs["If-None-Match"] = entry.etag
+        if entry.last_modified:
+            hdrs["If-Modified-Since"] = entry.last_modified
+        return hdrs
+
+    def put(self, key: str, raw_response: bytes, ttl: int = 300, stale_if_error: int = 180):
         now = time.time()
         # Opportunistic sweep so expired entries do not occupy RAM forever
         # when their keys are not requested again.
@@ -146,20 +213,39 @@ class ResponseCache:
             return
         # Evict oldest to make room
         while self._size + size > self._max and self._store:
-            oldest = next(iter(self._store))
-            self._size -= len(self._store[oldest][0])
-            del self._store[oldest]
+            _, evicted_entry = self._store.popitem(last=False)
+            self._size -= len(evicted_entry.raw)
         if key in self._store:
-            self._size -= len(self._store[key][0])
-        self._store[key] = (raw_response, now + ttl)
+            old_entry = self._store[key]
+            self._size -= len(old_entry.raw)
+            del self._store[key]
+        expires_at = now + ttl
+        stale_until = expires_at + max(0, int(stale_if_error))
+        self._store[key] = self.CacheEntry(
+            raw=raw_response,
+            expires_at=expires_at,
+            stale_until=stale_until,
+            etag=self._response_header(raw_response, "etag"),
+            last_modified=self._response_header(raw_response, "last-modified"),
+        )
         self._size += size
+
+    def refresh_from_not_modified(self, key: str, ttl: int = 300, stale_if_error: int = 180):
+        entry = self.get_entry(key)
+        if not entry:
+            return
+        now = time.time()
+        entry.expires_at = now + max(1, int(ttl))
+        entry.stale_until = entry.expires_at + max(0, int(stale_if_error))
+        entry.revalidating_until = 0.0
+        self._store.move_to_end(key)
 
     def _prune_expired(self, now: float | None = None) -> None:
         ts = now if now is not None else time.time()
-        expired = [k for k, (_, exp) in self._store.items() if exp <= ts]
+        expired = [k for k, e in self._store.items() if e.stale_until <= ts]
         for k in expired:
-            raw, _ = self._store.pop(k)
-            self._size -= len(raw)
+            entry = self._store.pop(k)
+            self._size -= len(entry.raw)
 
     @property
     def entry_count(self) -> int:
@@ -173,16 +259,41 @@ class ResponseCache:
     def max_bytes(self) -> int:
         return self._max
 
+    @property
+    def revalidations(self) -> int:
+        return self._revalidations
+
+    @staticmethod
+    def _response_header(raw_response: bytes, name: str) -> str:
+        hdr_end = raw_response.find(b"\r\n\r\n")
+        if hdr_end < 0:
+            return ""
+        target = name.lower()
+        for raw_line in raw_response[:hdr_end].split(b"\r\n")[1:]:
+            key, sep, value = raw_line.partition(b":")
+            if not sep:
+                continue
+            if key.decode(errors="replace").strip().lower() == target:
+                return value.decode(errors="replace").strip()
+        return ""
+
     @staticmethod
     def parse_ttl(raw_response: bytes, url: str) -> int:
         """Determine cache TTL from response headers and URL."""
         hdr_end = raw_response.find(b"\r\n\r\n")
         if hdr_end < 0:
             return 0
+        status_line = raw_response.split(b"\r\n", 1)[0]
+        if not status_line.startswith(b"HTTP/"):
+            return 0
+        try:
+            status = int(status_line.split()[1])
+        except Exception:
+            return 0
         hdr = raw_response[:hdr_end].decode(errors="replace").lower()
 
-        # Don't cache errors or non-200
-        if b"HTTP/1.1 200" not in raw_response[:20]:
+        # Don't cache errors or non-200/206
+        if status not in (200, 206):
             return 0
         if (
             "no-store" in hdr
@@ -235,6 +346,21 @@ class ResponseCache:
 
         return 0
 
+    @staticmethod
+    def parse_ttl_from_headers(raw_response: bytes, default_ttl: int = 300) -> int:
+        hdr_end = raw_response.find(b"\r\n\r\n")
+        if hdr_end < 0:
+            return max(1, min(int(default_ttl), CACHE_TTL_MAX))
+        hdr = raw_response[:hdr_end].decode(errors="replace").lower()
+        if "cache-control:" in hdr:
+            sm = re.search(r"s-maxage=(\d+)", hdr)
+            if sm:
+                return max(1, min(int(sm.group(1)), CACHE_TTL_MAX))
+            m = re.search(r"max-age=(\d+)", hdr)
+            if m:
+                return max(1, min(int(m.group(1)), CACHE_TTL_MAX))
+        return max(1, min(int(default_ttl), CACHE_TTL_MAX))
+
 
 class ProxyServer:
     # Pulled from constants.py so users can override any subset via config.
@@ -265,6 +391,12 @@ class ProxyServer:
         "claude.ai",
         "anthropic.com",
     )
+    # Auth/bootstrap script hosts are fragile behind relay rewriting.
+    # Prefer end-to-end direct TLS and avoid relay fallback on failure.
+    _DIRECT_ONLY_EXACT_HOSTS      = frozenset({
+        "accounts.google.com",
+        "apis.google.com",
+    })
 
     def __init__(self, config: dict):
         self.host = config.get("listen_host", "127.0.0.1")
@@ -281,11 +413,27 @@ class ProxyServer:
             )
         self.fronter = DomainFronter(config)
         self.mitm = None
-        self._cache = ResponseCache(max_mb=CACHE_MAX_MB)
+        self._cache = ResponseCache(max_mb=self._cfg_int(
+            config, "cache_max_mb", CACHE_MAX_MB, minimum=16,
+        ))
+        self._cache_stale_if_error = self._cfg_int(
+            config, "cache_stale_if_error_s", 180, minimum=0,
+        )
         self._cache_stats_last_log = 0.0
         self._cache_stats_interval = 60.0
         self._cache_stats_last_hits = 0
         self._cache_stats_last_misses = 0
+        self._cache_stats_last_stale_hits = 0
+        self._cache_stats_last_revalidations = 0
+        self._cache_inflight: dict[str, asyncio.Future] = {}
+        self._cache_inflight_lock = asyncio.Lock()
+        self._client_id_seq = 0
+        self._cache_revalidate_timeout = self._cfg_float(
+            config, "cache_revalidate_timeout_s", 8.0, minimum=1.0,
+        )
+        self._cache_revalidate_cooldown = self._cfg_int(
+            config, "cache_revalidate_cooldown_s", 10, minimum=1,
+        )
         self._direct_fail_until: dict[str, float] = {}
         self._relay_fail_until: dict[str, float] = {}
         self._relay_fail_streak: dict[str, int] = {}
@@ -293,6 +441,21 @@ class ProxyServer:
         self._client_tasks: set[asyncio.Task] = set()
         self._tcp_connect_timeout = self._cfg_float(
             config, "tcp_connect_timeout", TCP_CONNECT_TIMEOUT, minimum=1.0,
+        )
+        self._tcp_send_buffer = self._cfg_int(
+            config, "tcp_send_buffer", 256 * 1024, minimum=16 * 1024,
+        )
+        self._tcp_recv_buffer = self._cfg_int(
+            config, "tcp_recv_buffer", 256 * 1024, minimum=16 * 1024,
+        )
+        self._half_open_rx_timeout = self._cfg_float(
+            config, "half_open_rx_timeout_s", 15.0, minimum=5.0,
+        )
+        self._half_open_probe_timeout = self._cfg_float(
+            config, "half_open_probe_timeout_s", 2.0, minimum=0.5,
+        )
+        self._dc_failover_attempts = self._cfg_int(
+            config, "dc_failover_attempts", 2, minimum=1,
         )
         self._download_min_size = self._cfg_int(
             config, "chunked_download_min_size", 5 * 1024 * 1024, minimum=0,
@@ -344,10 +507,14 @@ class ProxyServer:
         # ── Per-host policy ────────────────────────────────────────
         # block_hosts  — refuse traffic entirely (close or 403)
         # bypass_hosts — route directly (no MITM, no relay)
+        # no_mitm_hosts / no_mitm_cidrs — raw CONNECT tunnel only
+        # (no TLS interception), useful for pinned-cert apps.
         # Both accept exact hostnames and leading-dot suffix patterns,
         # e.g. ".local" matches any *.local domain.
         self._block_hosts  = self._load_host_rules(config.get("block_hosts", []))
         self._bypass_hosts = self._load_host_rules(config.get("bypass_hosts", []))
+        self._no_mitm_hosts = self._load_host_rules(config.get("no_mitm_hosts", []))
+        self._no_mitm_cidrs = self._load_cidr_rules(config.get("no_mitm_cidrs", []))
 
         # Route YouTube through the relay when requested; the Google frontend
         # IP can enforce SafeSearch on the SNI-rewrite path.
@@ -415,6 +582,34 @@ class ProxyServer:
             self._client_tasks.add(task)
         return task
 
+    def _next_client_id(self) -> str:
+        self._client_id_seq += 1
+        return f"c{self._client_id_seq}"
+
+    @staticmethod
+    def _client_ip(addr) -> str:
+        try:
+            if isinstance(addr, tuple) and len(addr) > 0:
+                return str(addr[0])
+            return str(addr or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _platform_from_user_agent(user_agent: str) -> str:
+        ua = (user_agent or "").lower()
+        if "android" in ua:
+            return "Android"
+        if "iphone" in ua or "ipad" in ua or "ios" in ua:
+            return "iOS"
+        if "windows" in ua:
+            return "Windows"
+        if "mac os" in ua or "macintosh" in ua:
+            return "macOS"
+        if "linux" in ua:
+            return "Linux"
+        return "Unknown"
+
     def _untrack_task(self, task: asyncio.Task | None) -> None:
         if task is not None:
             self._client_tasks.discard(task)
@@ -455,6 +650,80 @@ class ProxyServer:
 
     def _is_bypassed(self, host: str) -> bool:
         return self._host_matches_rules(host, self._bypass_hosts)
+
+    def _is_no_mitm_host(self, host: str) -> bool:
+        return self._host_matches_rules(host, self._no_mitm_hosts)
+
+    @staticmethod
+    def _load_cidr_rules(raw) -> tuple:
+        nets: list = []
+        for item in raw or []:
+            cidr = str(item).strip()
+            if not cidr:
+                continue
+            try:
+                nets.append(ipaddress.ip_network(cidr, strict=False))
+            except ValueError:
+                log.warning("Ignoring invalid CIDR rule: %r", item)
+        return tuple(nets)
+
+    def _ip_matches_no_mitm_cidr(self, host: str) -> bool:
+        if not self._no_mitm_cidrs or not _is_ip_literal(host):
+            return False
+        try:
+            ip_obj = ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            return False
+        for net in self._no_mitm_cidrs:
+            if ip_obj.version == net.version and ip_obj in net:
+                return True
+        return False
+
+    @staticmethod
+    def _is_telegram_host(host: str) -> bool:
+        h = host.lower().rstrip(".")
+        return (
+            h == "telegram.org"
+            or h.endswith(".telegram.org")
+            or h == "t.me"
+            or h.endswith(".t.me")
+            or h.endswith(".telegram-cdn.org")
+            or h.endswith(".telesco.pe")
+            or h.endswith(".tdesktop.com")
+        )
+
+    def _is_telegram_target(self, host: str) -> bool:
+        return self._is_telegram_host(host) or self._ip_matches_no_mitm_cidr(host)
+
+    def _pick_alternate_dc_ips(self, ip_text: str, max_count: int) -> list[str]:
+        if max_count <= 0:
+            return []
+        try:
+            ip_obj = ipaddress.ip_address(ip_text.strip("[]"))
+        except ValueError:
+            return []
+        pools = [n for n in self._no_mitm_cidrs if n.version == ip_obj.version]
+        if not pools:
+            return []
+        choices: list[str] = []
+        seen = {str(ip_obj)}
+        attempts = 0
+        while len(choices) < max_count and attempts < (max_count * 12):
+            attempts += 1
+            net = random.choice(pools)
+            if ip_obj in net and net.num_addresses > 4:
+                # Prefer a different network when possible.
+                continue
+            if ip_obj.version == 4 and net.num_addresses > 2:
+                off = random.randrange(1, int(net.num_addresses) - 1)
+            else:
+                off = random.randrange(0, int(net.num_addresses))
+            cand = str(net.network_address + off)
+            if cand in seen:
+                continue
+            seen.add(cand)
+            choices.append(cand)
+        return choices
 
     def _relay_temporarily_disabled(self, host: str) -> bool:
         h = host.lower().rstrip(".")
@@ -590,16 +859,26 @@ class ProxyServer:
 
         hits = self._cache.hits
         misses = self._cache.misses
+        stale_hits = self._cache.stale_hits
         total = hits + misses
         delta_hits = hits - self._cache_stats_last_hits
         delta_misses = misses - self._cache_stats_last_misses
+        delta_stale_hits = stale_hits - self._cache_stats_last_stale_hits
+        revalidations = self._cache.revalidations
+        delta_revalidations = revalidations - self._cache_stats_last_revalidations
         delta_total = max(0, delta_hits + delta_misses)
 
         self._cache_stats_last_hits = hits
         self._cache_stats_last_misses = misses
+        self._cache_stats_last_stale_hits = stale_hits
+        self._cache_stats_last_revalidations = revalidations
 
         hit_ratio = (hits / total * 100.0) if total else 0.0
         window_hit_ratio = (delta_hits / delta_total * 100.0) if delta_total else 0.0
+        window_effective_hit_ratio = (
+            ((delta_hits + delta_stale_hits) / delta_total * 100.0)
+            if delta_total else 0.0
+        )
         fill_ratio = (
             self._cache.size_bytes / self._cache.max_bytes * 100.0
             if self._cache.max_bytes else 0.0
@@ -612,15 +891,219 @@ class ProxyServer:
             suggestion = "decrease_cache_mb"
 
         log.info(
-            "CACHE stats: hit=%.1f%% window=%.1f%% entries=%d size=%.1fMB/%.1fMB (%.0f%%) suggestion=%s",
+            "CACHE stats: hit=%.1f%% window=%.1f%% effective=%.1f%% reval=%d entries=%d size=%.1fMB/%.1fMB (%.0f%%) suggestion=%s",
             hit_ratio,
             window_hit_ratio,
+            window_effective_hit_ratio,
+            max(0, delta_revalidations),
             self._cache.entry_count,
             self._cache.size_bytes / (1024 * 1024),
             self._cache.max_bytes / (1024 * 1024),
             fill_ratio,
             suggestion,
         )
+        if runtime_stats:
+            try:
+                runtime_stats.cache_snapshot(self._cache.entry_count, self._cache.size_bytes)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _response_status_code(response: bytes | None) -> int:
+        if not response:
+            return 0
+        line = response.split(b"\r\n", 1)[0]
+        m = re.match(rb"HTTP/\d(?:\.\d)?\s+(\d{3})", line)
+        if not m:
+            return 0
+        try:
+            return int(m.group(1))
+        except Exception:
+            return 0
+
+    async def _fetch_with_cache(self, host: str, method: str, url: str,
+                                headers: dict | None, body: bytes,
+                                cacheable: bool, cache_key: str) -> bytes:
+        if not cacheable:
+            return await self._fetch_uncached(host, method, url, headers, body)
+
+        response = self._cache.get(cache_key)
+        if response is not None:
+            if runtime_stats:
+                try:
+                    runtime_stats.cache_hit()
+                except Exception:
+                    pass
+            return response
+
+        stale = self._cache.get_stale(cache_key)
+        if stale is not None:
+            if runtime_stats:
+                try:
+                    runtime_stats.cache_stale_hit()
+                except Exception:
+                    pass
+            await self._maybe_revalidate_in_background(
+                host, method, url, headers, body, cache_key
+            )
+            return stale
+
+        if runtime_stats:
+            try:
+                runtime_stats.cache_miss()
+            except Exception:
+                pass
+
+        inflight = None
+        owner = False
+        async with self._cache_inflight_lock:
+            inflight = self._cache_inflight.get(cache_key)
+            if inflight is None:
+                inflight = asyncio.get_running_loop().create_future()
+                self._cache_inflight[cache_key] = inflight
+                owner = True
+
+        if not owner:
+            try:
+                coalesced = await inflight
+                if coalesced:
+                    return coalesced
+            except Exception:
+                pass
+            response = self._cache.get(cache_key)
+            if response is not None:
+                return response
+            return await self._fetch_uncached(host, method, url, headers, body)
+
+        try:
+            response = await self._fetch_uncached(host, method, url, headers, body)
+            status_code = self._response_status_code(response)
+            if status_code == 304:
+                ttl_304 = ResponseCache.parse_ttl_from_headers(response, default_ttl=300)
+                self._cache.refresh_from_not_modified(
+                    cache_key,
+                    ttl=ttl_304,
+                    stale_if_error=self._cache_stale_if_error,
+                )
+                refreshed = self._cache.get(cache_key) or self._cache.get_stale(cache_key)
+                if refreshed:
+                    if not inflight.done():
+                        inflight.set_result(refreshed)
+                    return refreshed
+            if 500 <= status_code <= 599:
+                stale = self._cache.get_stale(cache_key)
+                if stale is not None:
+                    if runtime_stats:
+                        try:
+                            runtime_stats.cache_stale_hit()
+                        except Exception:
+                            pass
+                    if not inflight.done():
+                        inflight.set_result(stale)
+                    return stale
+            ttl = ResponseCache.parse_ttl(response, url)
+            if ttl > 0:
+                self._cache.put(
+                    cache_key,
+                    response,
+                    ttl=ttl,
+                    stale_if_error=self._cache_stale_if_error,
+                )
+                log.debug("Cached (%ds): %s", ttl, url[:60])
+            if not inflight.done():
+                inflight.set_result(response)
+            return response
+        except Exception as exc:
+            stale = self._cache.get_stale(cache_key)
+            if stale is not None:
+                if runtime_stats:
+                    try:
+                        runtime_stats.cache_stale_hit()
+                    except Exception:
+                        pass
+                if not inflight.done():
+                    inflight.set_result(stale)
+                return stale
+            if not inflight.done():
+                inflight.set_exception(exc)
+            raise
+        finally:
+            async with self._cache_inflight_lock:
+                if self._cache_inflight.get(cache_key) is inflight:
+                    self._cache_inflight.pop(cache_key, None)
+
+    async def _fetch_uncached(self, host: str, method: str, url: str,
+                              headers: dict | None, body: bytes) -> bytes:
+        if self._relay_temporarily_disabled(host):
+            err_body = b"Relay temporarily unavailable for this host; retry shortly."
+            log.warning("Relay circuit-open fast-fail: %s", host)
+            return (
+                b"HTTP/1.1 503 Service Unavailable\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Retry-After: 20\r\n"
+                b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
+                b"\r\n" + err_body
+            )
+        try:
+            response = await self._relay_smart(method, url, headers, body)
+            self._record_relay_result(host, success=True)
+            return response
+        except Exception as e:
+            self._record_relay_result(host, success=False)
+            log.error("Relay error (%s): %s", url[:60], e)
+            err_body = f"Relay error: {e}".encode()
+            return (
+                b"HTTP/1.1 502 Bad Gateway\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
+                b"\r\n" + err_body
+            )
+
+    async def _maybe_revalidate_in_background(self, host: str, method: str, url: str,
+                                              headers: dict | None, body: bytes,
+                                              cache_key: str) -> None:
+        if method.upper() != "GET" or body:
+            return
+        if not self._cache.can_background_revalidate(
+            cache_key, cooldown_s=self._cache_revalidate_cooldown
+        ):
+            return
+        try:
+            asyncio.create_task(self._background_revalidate(
+                host, method, url, headers, body, cache_key
+            ))
+        except Exception:
+            pass
+
+    async def _background_revalidate(self, host: str, method: str, url: str,
+                                     headers: dict | None, body: bytes,
+                                     cache_key: str) -> None:
+        req_headers = dict(headers or {})
+        req_headers.update(self._cache.conditional_headers(cache_key))
+        try:
+            response = await asyncio.wait_for(
+                self._fetch_uncached(host, method, url, req_headers, body),
+                timeout=self._cache_revalidate_timeout,
+            )
+        except Exception:
+            return
+        status = self._response_status_code(response)
+        if status == 304:
+            ttl_304 = ResponseCache.parse_ttl_from_headers(response, default_ttl=300)
+            self._cache.refresh_from_not_modified(
+                cache_key,
+                ttl=ttl_304,
+                stale_if_error=self._cache_stale_if_error,
+            )
+            return
+        ttl = ResponseCache.parse_ttl(response, url)
+        if ttl > 0:
+            self._cache.put(
+                cache_key,
+                response,
+                ttl=ttl,
+                stale_if_error=self._cache_stale_if_error,
+            )
 
     @classmethod
     def _is_sensitive_app_host(cls, host: str) -> bool:
@@ -701,7 +1184,19 @@ class ProxyServer:
 
     async def _on_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         addr = writer.get_extra_info("peername")
+        client_id = self._next_client_id()
+        client_ip = self._client_ip(addr)
+        client_ua = ""
+        client_platform = "Unknown"
+        client_start = time.time()
+        client_req_count = 0
+        client_err_count = 0
         task = self._track_current_task()
+        if runtime_stats:
+            try:
+                runtime_stats.client_connected(client_id, client_ip, transport="http")
+            except Exception:
+                pass
         try:
             first_line = await asyncio.wait_for(reader.readline(), timeout=30)
             if not first_line:
@@ -734,19 +1229,64 @@ class ProxyServer:
                 return
 
             method = parts[0].upper()
+            header_lines = header_block.split(b"\r\n")[1:]
+            for raw_line in header_lines:
+                if b":" not in raw_line:
+                    continue
+                k, v = raw_line.decode(errors="replace").split(":", 1)
+                if k.strip().lower() == "user-agent":
+                    client_ua = v.strip()
+                    client_platform = self._platform_from_user_agent(client_ua)
+                    if runtime_stats:
+                        try:
+                            runtime_stats.client_connected(
+                                client_id,
+                                client_ip,
+                                transport="http",
+                                platform_hint=client_platform,
+                                user_agent=client_ua,
+                            )
+                        except Exception:
+                            pass
+                    break
 
             if method == "CONNECT":
+                client_req_count += 1
                 await self._do_connect(parts[1], reader, writer)
             else:
+                client_req_count += 1
                 await self._do_http(header_block, reader, writer)
 
         except asyncio.CancelledError:
             pass
         except asyncio.TimeoutError:
+            client_err_count += 1
+            if runtime_stats:
+                try:
+                    runtime_stats.client_error(client_id, "timeout")
+                except Exception:
+                    pass
             log.debug("Timeout: %s", addr)
         except Exception as e:
+            client_err_count += 1
+            if runtime_stats:
+                try:
+                    runtime_stats.client_error(client_id, str(e))
+                except Exception:
+                    pass
             log.error("Error (%s): %s", addr, e)
         finally:
+            if runtime_stats:
+                try:
+                    duration_ms = max((time.time() - client_start) * 1000.0, 0.0)
+                    runtime_stats.client_activity(
+                        client_id,
+                        req_inc=max(client_req_count, 1),
+                        latency_ms=duration_ms / max(client_req_count, 1),
+                    )
+                    runtime_stats.client_disconnected(client_id)
+                except Exception:
+                    pass
             self._untrack_task(task)
             try:
                 writer.close()
@@ -757,7 +1297,17 @@ class ProxyServer:
     async def _on_socks_client(self, reader: asyncio.StreamReader,
                                writer: asyncio.StreamWriter):
         addr = writer.get_extra_info("peername")
+        client_id = self._next_client_id()
+        client_ip = self._client_ip(addr)
+        client_start = time.time()
+        client_target = ""
+        client_err_count = 0
         task = self._track_current_task()
+        if runtime_stats:
+            try:
+                runtime_stats.client_connected(client_id, client_ip, transport="socks5")
+            except Exception:
+                pass
         try:
             header = await asyncio.wait_for(reader.readexactly(2), timeout=15)
             ver, nmethods = header[0], header[1]
@@ -798,6 +1348,12 @@ class ProxyServer:
 
             port_raw = await asyncio.wait_for(reader.readexactly(2), timeout=10)
             port = int.from_bytes(port_raw, "big")
+            client_target = f"{host}:{port}"
+            if runtime_stats:
+                try:
+                    runtime_stats.client_set_target(client_id, client_target)
+                except Exception:
+                    pass
 
             log.info("SOCKS5 CONNECT → %s:%d", host, port)
 
@@ -810,10 +1366,33 @@ class ProxyServer:
         except asyncio.CancelledError:
             pass
         except asyncio.TimeoutError:
+            client_err_count += 1
+            if runtime_stats:
+                try:
+                    runtime_stats.client_error(client_id, "socks_timeout")
+                except Exception:
+                    pass
             log.debug("SOCKS5 timeout: %s", addr)
         except Exception as e:
+            client_err_count += 1
+            if runtime_stats:
+                try:
+                    runtime_stats.client_error(client_id, str(e))
+                except Exception:
+                    pass
             log.error("SOCKS5 error (%s): %s", addr, e)
         finally:
+            if runtime_stats:
+                try:
+                    duration_ms = max((time.time() - client_start) * 1000.0, 0.0)
+                    runtime_stats.client_activity(
+                        client_id,
+                        req_inc=1,
+                        latency_ms=duration_ms,
+                    )
+                    runtime_stats.client_disconnected(client_id)
+                except Exception:
+                    pass
             self._untrack_task(task)
             try:
                 writer.close()
@@ -859,6 +1438,26 @@ class ProxyServer:
         if self._is_bypassed(host):
             log.info("Bypass tunnel → %s:%d (matches bypass_hosts)", host, port)
             await self._do_direct_tunnel(host, port, reader, writer)
+            return
+        if self._is_no_mitm_host(host):
+            log.info("No-MITM tunnel → %s:%d (matches no_mitm_hosts)", host, port)
+            if self._is_telegram_target(host):
+                log.info("Telegram no-MITM route selected → %s:%d (host rule)", host, port)
+            await self._do_direct_tunnel(host, port, reader, writer)
+            return
+        if self._ip_matches_no_mitm_cidr(host):
+            log.info("No-MITM tunnel → %s:%d (matches no_mitm_cidrs)", host, port)
+            log.info("Telegram no-MITM route selected → %s:%d (CIDR rule)", host, port)
+            await self._do_direct_tunnel(host, port, reader, writer)
+            return
+
+        # Some cross-site auth/script hosts break when their responses are
+        # relayed through Apps Script (MIME/ORB issues). Keep them direct-only.
+        if host.lower().rstrip(".") in self._DIRECT_ONLY_EXACT_HOSTS:
+            log.info("Direct-only tunnel → %s:%d", host, port)
+            ok = await self._do_direct_tunnel(host, port, reader, writer)
+            if not ok:
+                log.warning("Direct-only host failed (no relay fallback): %s:%d", host, port)
             return
 
         # ── IP-literal destinations ───────────────────────────────
@@ -1107,10 +1706,31 @@ class ProxyServer:
 
         for family, ip in candidates:
             try:
-                return await asyncio.wait_for(
+                conn = await asyncio.wait_for(
                     asyncio.open_connection(ip, port, family=family or 0),
                     timeout=timeout,
                 )
+                _, w = conn
+                sock = w.get_extra_info("socket")
+                if sock is not None:
+                    try:
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    except OSError:
+                        pass
+                    try:
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    except OSError:
+                        pass
+                    try:
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, self._tcp_send_buffer)
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self._tcp_recv_buffer)
+                    except OSError:
+                        pass
+                    log.debug(
+                        "Socket tuning applied → %s:%d (nodelay=1 keepalive=1 sndbuf=%d rcvbuf=%d)",
+                        ip, port, self._tcp_send_buffer, self._tcp_recv_buffer,
+                    )
+                return conn
             except Exception as exc:
                 fam = "ipv4" if family == socket.AF_INET else (
                     "ipv6" if family == socket.AF_INET6 else "auto"
@@ -1138,14 +1758,61 @@ class ProxyServer:
         effective_timeout = (
             self._tcp_connect_timeout if timeout is None else float(timeout)
         )
-        try:
-            r_remote, w_remote = await self._open_tcp_connection(
-                target_ip, port, timeout=effective_timeout,
+        connect_candidates = [target_ip]
+        if _is_ip_literal(target_ip) and self._ip_matches_no_mitm_cidr(target_ip):
+            connect_candidates.extend(
+                self._pick_alternate_dc_ips(target_ip, self._dc_failover_attempts)
             )
-        except Exception as e:
+
+        r_remote = None
+        w_remote = None
+        last_err = None
+        connected_ip = target_ip
+        for idx, candidate_ip in enumerate(connect_candidates):
+            try:
+                r_remote, w_remote = await self._open_tcp_connection(
+                    candidate_ip, port, timeout=effective_timeout,
+                )
+                connected_ip = candidate_ip
+                if idx > 0:
+                    log.warning(
+                        "DC failover triggered → %s:%d (original=%s, selected=%s)",
+                        host, port, target_ip, candidate_ip,
+                    )
+                    if self._is_telegram_target(host):
+                        log.warning(
+                            "Telegram DC failover triggered → %s:%d (from %s to %s)",
+                            host, port, target_ip, candidate_ip,
+                        )
+                break
+            except Exception as e:
+                last_err = e
+                if idx + 1 < len(connect_candidates):
+                    log.warning(
+                        "DC failover triggered → %s:%d (candidate failed: %s)",
+                        host, port, candidate_ip,
+                    )
+                    if self._is_telegram_target(host):
+                        log.warning(
+                            "Telegram DC candidate failed → %s:%d (candidate=%s)",
+                            host, port, candidate_ip,
+                        )
+                continue
+        if r_remote is None or w_remote is None:
             log.error("Direct tunnel connect failed (%s via %s): %s",
-                      host, target_ip, e)
+                      host, target_ip, last_err)
             return False
+        log.info("Direct tunnel established → %s:%d", host, port)
+        if self._is_telegram_target(host):
+            log.info("Telegram tunnel established → %s:%d (upstream=%s)", host, port, connected_ip)
+
+        tunnel_state = {
+            "last_rx": time.time(),
+            "last_tx": time.time(),
+            "tx_bytes": 0,
+            "last_probe_tx_bytes": 0,
+            "degraded": False,
+        }
 
         async def pipe(src, dst, label):
             try:
@@ -1153,6 +1820,12 @@ class ProxyServer:
                     data = await src.read(65536)
                     if not data:
                         break
+                    now = time.time()
+                    if src is reader:
+                        tunnel_state["tx_bytes"] += len(data)
+                        tunnel_state["last_tx"] = now
+                    else:
+                        tunnel_state["last_rx"] = now
                     dst.write(data)
                     await dst.drain()
             except (ConnectionError, asyncio.CancelledError):
@@ -1171,9 +1844,50 @@ class ProxyServer:
                     except Exception:
                         pass
 
+        async def half_open_watchdog():
+            while True:
+                await asyncio.sleep(2.0)
+                if writer.is_closing() or w_remote.is_closing():
+                    return
+                no_rx_for = time.time() - tunnel_state["last_rx"]
+                tx_active = tunnel_state["tx_bytes"] > tunnel_state["last_probe_tx_bytes"]
+                if no_rx_for < self._half_open_rx_timeout or not tx_active:
+                    continue
+                tunnel_state["last_probe_tx_bytes"] = tunnel_state["tx_bytes"]
+                log.warning(
+                    "Half-open detection → %s:%d (no_rx_for=%.1fs, tx_bytes=%d)",
+                    host, port, no_rx_for, tunnel_state["tx_bytes"],
+                )
+                if self._is_telegram_target(host):
+                    log.warning("Telegram tunnel half-open suspected → %s:%d", host, port)
+                try:
+                    _, probe_w = await self._open_tcp_connection(
+                        connected_ip, port, timeout=self._half_open_probe_timeout,
+                    )
+                    probe_w.close()
+                    await probe_w.wait_closed()
+                except Exception:
+                    tunnel_state["degraded"] = True
+                    log.warning(
+                        "Half-open probe failed → %s:%d (mark degraded, reconnect required)",
+                        host, port,
+                    )
+                    if self._is_telegram_target(host):
+                        log.warning("Telegram DC failover hint → %s:%d (probe failure)", host, port)
+                    try:
+                        w_remote.close()
+                    except Exception:
+                        pass
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+                    return
+
         await asyncio.gather(
             pipe(reader, w_remote, f"client→{host}"),
             pipe(r_remote, writer, f"{host}→client"),
+            half_open_watchdog(),
         )
         return True
 
@@ -1310,6 +2024,7 @@ class ProxyServer:
 
     async def _relay_http_stream(self, host: str, port: int, reader, writer):
         """Read decrypted/origin-form HTTP requests and relay them."""
+        per_request_timeout = max(20.0, min(120.0, self._tcp_connect_timeout * 3.0))
         # Read and relay HTTP requests from the browser (now decrypted)
         while True:
             try:
@@ -1429,47 +2144,23 @@ class ProxyServer:
 
                 cacheable = self._cache_allowed(method, url, headers, body)
                 cache_key = ResponseCache.build_key(url, headers) if cacheable else ""
-
-                # Check local cache first (GET only)
-                response = None
-                if cacheable:
-                    response = self._cache.get(cache_key)
-                    if response:
-                        log.debug("Cache HIT: %s", url[:60])
-
-                if response is None:
-                    if self._relay_temporarily_disabled(host):
-                        err_body = b"Relay temporarily unavailable for this host; retry shortly."
-                        response = (
-                            b"HTTP/1.1 503 Service Unavailable\r\n"
-                            b"Content-Type: text/plain\r\n"
-                            b"Retry-After: 20\r\n"
-                            b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
-                            b"\r\n" + err_body
-                        )
-                        log.warning("Relay circuit-open fast-fail: %s", host)
-                    else:
-                    # Relay through Apps Script
-                        try:
-                            response = await self._relay_smart(method, url, headers, body)
-                            self._record_relay_result(host, success=True)
-                        except Exception as e:
-                            self._record_relay_result(host, success=False)
-                            log.error("Relay error (%s): %s", url[:60], e)
-                            err_body = f"Relay error: {e}".encode()
-                            response = (
-                                b"HTTP/1.1 502 Bad Gateway\r\n"
-                                b"Content-Type: text/plain\r\n"
-                                b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
-                                b"\r\n" + err_body
-                            )
-
-                    # Cache successful GET responses
-                    if cacheable and response:
-                        ttl = ResponseCache.parse_ttl(response, url)
-                        if ttl > 0:
-                            self._cache.put(cache_key, response, ttl)
-                            log.debug("Cached (%ds): %s", ttl, url[:60])
+                try:
+                    response = await asyncio.wait_for(
+                        self._fetch_with_cache(
+                            host, method, url, headers, body, cacheable, cache_key
+                        ),
+                        timeout=per_request_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    log.warning("Upstream timeout (%s %s)", method, url[:80])
+                    err_body = b"Upstream timeout. Please retry."
+                    response = (
+                        b"HTTP/1.1 504 Gateway Timeout\r\n"
+                        b"Content-Type: text/plain\r\n"
+                        b"Connection: keep-alive\r\n"
+                        b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
+                        b"\r\n" + err_body
+                    )
 
                 # Inject permissive CORS headers whenever the browser sent
                 # an Origin (cross-origin XHR / fetch). Without this, the
@@ -1675,38 +2366,10 @@ class ProxyServer:
 
         cacheable = self._cache_allowed(method, url, headers, body)
         cache_key = ResponseCache.build_key(url, headers) if cacheable else ""
-
-        # Cache check for GET
-        response = None
-        if cacheable:
-            response = self._cache.get(cache_key)
-            if response:
-                log.debug("Cache HIT (HTTP): %s", url[:60])
-
-        if response is None:
-            host = (urlparse(url).hostname or "").lower()
-            if self._relay_temporarily_disabled(host):
-                err_body = b"Relay temporarily unavailable for this host; retry shortly."
-                response = (
-                    b"HTTP/1.1 503 Service Unavailable\r\n"
-                    b"Content-Type: text/plain\r\n"
-                    b"Retry-After: 20\r\n"
-                    b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
-                    b"\r\n" + err_body
-                )
-                log.warning("Relay circuit-open fast-fail: %s", host)
-            else:
-                try:
-                    response = await self._relay_smart(method, url, headers, body)
-                    self._record_relay_result(host, success=True)
-                except Exception:
-                    self._record_relay_result(host, success=False)
-                    raise
-            # Cache successful GET
-            if cacheable and response:
-                ttl = ResponseCache.parse_ttl(response, url)
-                if ttl > 0:
-                    self._cache.put(cache_key, response, ttl)
+        host = (urlparse(url).hostname or "").lower()
+        response = await self._fetch_with_cache(
+            host, method, url, headers, body, cacheable, cache_key
+        )
 
         if origin and response:
             response = self._inject_cors_headers(response, origin)

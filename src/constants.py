@@ -80,7 +80,7 @@ BATCH_MAX               = 50
 
 # ── Fan-out relay (parallel Apps Script instances) ────────────────────────
 # How long to ignore a script ID after it fails or is unreasonably slow.
-SCRIPT_BLACKLIST_TTL    = 600.0   # 10 minutes
+SCRIPT_BLACKLIST_TTL    = 240.0   # 4 minutes
 
 
 # ── SNI rotation pool ─────────────────────────────────────────────────────

@@ -70,18 +70,38 @@ public class FirstRunService
         if (string.IsNullOrWhiteSpace(cfg.GoogleIp)) cfg.GoogleIp = "216.239.38.120";
         if (string.IsNullOrWhiteSpace(cfg.FrontDomain)) cfg.FrontDomain = "www.google.com";
         if (string.IsNullOrWhiteSpace(cfg.ListenHost)) cfg.ListenHost = "127.0.0.1";
+        cfg.ListenHost = cfg.ListenHost.Trim();
+        if (cfg.ListenHost.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+            cfg.ListenHost = "127.0.0.1";
+        if (cfg.ListenHost == "0.0.0.0" || cfg.ListenHost == "::")
+            cfg.LanSharing = true;
         if (cfg.ListenPort <= 0 || cfg.ListenPort > 65535) cfg.ListenPort = 8085;
 
         cfg.EnableHttp2 = false;
         if (cfg.ChunkSize <= 0)    cfg.ChunkSize = 131072;
-        if (cfg.MaxParallel <= 0)  cfg.MaxParallel = 2;
+        if (cfg.MaxParallel <= 0)  cfg.MaxParallel = 3;
         if (cfg.FragmentSize <= 0) cfg.FragmentSize = 16384;
         if (cfg.MultiIdFailThreshold <= 0) cfg.MultiIdFailThreshold = 2;
-        if (cfg.MultiIdCooldownSeconds <= 0) cfg.MultiIdCooldownSeconds = 120;
-        if (cfg.MultiIdMaxConsecutive <= 0) cfg.MultiIdMaxConsecutive = 2;
+        if (cfg.MultiIdCooldownSeconds <= 0) cfg.MultiIdCooldownSeconds = 20;
+        if (cfg.MultiIdMaxConsecutive <= 0) cfg.MultiIdMaxConsecutive = 1;
         if (string.IsNullOrWhiteSpace(cfg.MultiIdStrategy)) cfg.MultiIdStrategy = "fair_spread";
         if (cfg.CacheDefaultTtlS <= 0) cfg.CacheDefaultTtlS = 900;
-        if (cfg.CacheStaleIfErrorS < 0) cfg.CacheStaleIfErrorS = 180;
+        if (cfg.CacheStaleIfErrorS < 0) cfg.CacheStaleIfErrorS = 240;
+        if (cfg.CacheMaxMb <= 0) cfg.CacheMaxMb = 160;
+        if (cfg.RelayTimeout <= 0) cfg.RelayTimeout = 35;
+        if (cfg.ScriptBlacklistTtlS <= 0) cfg.ScriptBlacklistTtlS = 240;
+        if (cfg.RetrySafeAttempts <= 0) cfg.RetrySafeAttempts = 2;
+        if (cfg.RetryBackoffBaseMs <= 0) cfg.RetryBackoffBaseMs = 140;
+        if (cfg.GoogleIpRefreshIntervalS <= 0) cfg.GoogleIpRefreshIntervalS = 600;
+        if (cfg.GoogleIpProbeTimeoutS <= 0) cfg.GoogleIpProbeTimeoutS = 3;
+        if (cfg.GoogleIpProbeSampleSize <= 0) cfg.GoogleIpProbeSampleSize = 8;
+        if (cfg.GoogleIpSwitchMinImprovementMs < 0) cfg.GoogleIpSwitchMinImprovementMs = 120;
+        if (cfg.WatchdogFailureThreshold <= 0) cfg.WatchdogFailureThreshold = 4;
+        if (cfg.WatchdogCooldownS <= 0) cfg.WatchdogCooldownS = 45;
+        if (string.IsNullOrWhiteSpace(cfg.UpdateChannel)) cfg.UpdateChannel = "stable";
+        if (cfg.BypassHosts == null) cfg.BypassHosts = new();
+        if (cfg.ForceRelayHosts == null) cfg.ForceRelayHosts = new();
+        if (cfg.DomainRoutingProfiles == null) cfg.DomainRoutingProfiles = new();
 
         if (string.IsNullOrWhiteSpace(cfg.LogLevel)) cfg.LogLevel = "INFO";
         if (string.IsNullOrWhiteSpace(cfg.AuthKey)) cfg.AuthKey = "CHANGE_ME_TO_A_STRONG_SECRET";

@@ -1,0 +1,90 @@
+<UserControl x:Class="MasterRelayVPN.Views.ClientsPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DesignHeight="400"
+             d:DesignWidth="640">
+    <UserControl.Resources>
+        <Style x:Key="AnalyticsCardLocal" TargetType="Border" BasedOn="{StaticResource MetricTile}">
+            <Setter Property="Padding" Value="12"/>
+            <Setter Property="Margin" Value="0,0,8,8"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsCompactDensity}" Value="True">
+                    <Setter Property="Padding" Value="8"/>
+                    <Setter Property="Margin" Value="0,0,6,6"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </UserControl.Resources>
+
+    <Border Style="{StaticResource Panel}" Padding="12">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <StackPanel>
+                <TextBlock Text="Active Clients" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                <UniformGrid Columns="3" Margin="0,0,0,8">
+                    <Border Style="{StaticResource AnalyticsCardLocal}">
+                        <StackPanel>
+                            <TextBlock Text="Active" Style="{StaticResource Caption}"/>
+                            <TextBlock Text="{Binding ClientsActiveLabel}" Style="{StaticResource StatMed}"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource AnalyticsCardLocal}">
+                        <StackPanel>
+                            <TextBlock Text="Seen (Session)" Style="{StaticResource Caption}"/>
+                            <TextBlock Text="{Binding ClientsSeenLabel}" Style="{StaticResource StatMed}"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource AnalyticsCardLocal}">
+                        <StackPanel>
+                            <TextBlock Text="Listen" Style="{StaticResource Caption}"/>
+                            <TextBlock Text="{Binding ListenHost, StringFormat={}{0}:{Binding ListenPort}}"/>
+                        </StackPanel>
+                    </Border>
+                </UniformGrid>
+            </StackPanel>
+
+            <Grid Grid.Row="1">
+                <ListView ItemsSource="{Binding ClientConnections}" Background="Transparent" BorderThickness="0">
+                    <ListView.View>
+                        <GridView>
+                            <GridViewColumn Header="Status" Width="72" DisplayMemberBinding="{Binding Active}"/>
+                            <GridViewColumn Header="Client IP" Width="135" DisplayMemberBinding="{Binding Ip}"/>
+                            <GridViewColumn Header="Platform" Width="80" DisplayMemberBinding="{Binding PlatformHint}"/>
+                            <GridViewColumn Header="Transport" Width="80" DisplayMemberBinding="{Binding Transport}"/>
+                            <GridViewColumn Header="Target" Width="150" DisplayMemberBinding="{Binding TargetHost}"/>
+                            <GridViewColumn Header="Req" Width="55" DisplayMemberBinding="{Binding Requests}"/>
+                            <GridViewColumn Header="Err" Width="55" DisplayMemberBinding="{Binding Errors}"/>
+                            <GridViewColumn Header="Avg Latency" Width="95" DisplayMemberBinding="{Binding LatencyMsAvg, StringFormat={}{0:0} ms}"/>
+                            <GridViewColumn Header="Up" Width="90" DisplayMemberBinding="{Binding BytesUp}"/>
+                            <GridViewColumn Header="Down" Width="90" DisplayMemberBinding="{Binding BytesDown}"/>
+                        </GridView>
+                    </ListView.View>
+                </ListView>
+                <TextBlock Text="No client connections yet. Enable LAN and connect devices to this host:port."
+                           Foreground="{StaticResource FgDimBrush}"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           FontStyle="Italic"
+                           IsHitTestVisible="False">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding ClientConnections.Count}" Value="0">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+            </Grid>
+        </Grid>
+    </Border>
+</UserControl>
