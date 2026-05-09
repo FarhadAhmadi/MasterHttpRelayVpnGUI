@@ -139,6 +139,7 @@ public class MainViewModel : ObservableBase
         AnalyzeAndRecommendCmd = new RelayCommand(AnalyzeAndRecommend);
         ResetSystemStateCmd = new RelayCommand(async () => await ResetSystemStateAsync(), () => !Busy);
         ToggleLanguageCmd = new RelayCommand(ToggleLanguage);
+        ApplyTelegramOptimizedCmd = new RelayCommand(ApplyTelegramOptimizedProfile);
 
         AddDeploymentCmd    = new RelayCommand(AddDeployment);
         RemoveDeploymentCmd = new RelayCommand(p => RemoveDeployment(p as DeploymentEntry));
@@ -217,6 +218,15 @@ public class MainViewModel : ObservableBase
         CacheMaxMb = Math.Clamp(CacheMaxMb, 96, 512);
         CacheStaleIfErrorS = Math.Clamp(CacheStaleIfErrorS, 180, 900);
         AutoGoogleIpRefresh = true;
+        TelegramOptimizations = true;
+        TelegramForceDirect = true;
+        TelegramAllowRelayFallback = false;
+        TelegramDisableBatch = true;
+        TelegramDisableFanout = true;
+        TelegramMaxInflightRelays = Math.Clamp(TelegramMaxInflightRelays, 4, 12);
+        MultiIdMinLiveEndpoints = Math.Clamp(MultiIdMinLiveEndpoints, 1, 3);
+        TelegramMultiIdFailThreshold = Math.Clamp(TelegramMultiIdFailThreshold, 4, 8);
+        TelegramMultiIdCooldownFactor = Math.Clamp(TelegramMultiIdCooldownFactor, 0.45, 0.8);
     }
 
     async Task RunStartupSelfTestAsync()
@@ -380,7 +390,8 @@ public class MainViewModel : ObservableBase
         foreach (var n in new[]
         {
             nameof(Mode), nameof(FrontDomain), nameof(CustomSni), nameof(ScriptId),
-            nameof(WorkerHost), nameof(CustomDomain), nameof(AuthKey), nameof(GoogleIp),
+            nameof(WorkerHost), nameof(CustomDomain), nameof(AuthKey), nameof(RelaySignRequests),
+            nameof(RelaySigningKey), nameof(RelaySignVersion), nameof(GoogleIp),
             nameof(ListenHost), nameof(AllowLan), nameof(ListenPort), nameof(LogLevelText), nameof(VerifySsl),
             nameof(EnableHttp2), nameof(EnableChunked), nameof(ChunkSize),
             nameof(MaxParallel), nameof(FragmentSize), nameof(ActivePreset),
@@ -394,7 +405,11 @@ public class MainViewModel : ObservableBase
             nameof(MultiIdFailThreshold), nameof(MultiIdCooldownSeconds),
             nameof(MultiIdStrategy), nameof(MultiIdMaxConsecutive),
             nameof(DirectBypassDomainsText), nameof(NoMitmHostsText), nameof(NoMitmCidrsText), nameof(ForceRelayDomainsText),
+            nameof(DomainRoutingProfilesText),
             nameof(TcpSendBuffer), nameof(TcpRecvBuffer), nameof(HalfOpenRxTimeoutS), nameof(HalfOpenProbeTimeoutS), nameof(DcFailoverAttempts),
+            nameof(TelegramOptimizations), nameof(TelegramForceDirect), nameof(TelegramAllowRelayFallback),
+            nameof(TelegramDisableBatch), nameof(TelegramDisableFanout), nameof(TelegramMaxInflightRelays),
+            nameof(MultiIdMinLiveEndpoints), nameof(TelegramMultiIdFailThreshold), nameof(TelegramMultiIdCooldownFactor),
             nameof(UpdateChannel), nameof(AutoUpdateCheck), nameof(UpdateMetadataUrl), nameof(UpdatePublicKeyPem),
         }) Raise(n);
     }
@@ -407,6 +422,9 @@ public class MainViewModel : ObservableBase
     public string WorkerHost    { get => _cfg.WorkerHost ?? "";  set { _cfg.WorkerHost = value; Raise(); } }
     public string CustomDomain  { get => _cfg.CustomDomain ?? ""; set { _cfg.CustomDomain = value; Raise(); } }
     public string AuthKey       { get => _cfg.AuthKey;        set { _cfg.AuthKey = value; Raise(); } }
+    public bool RelaySignRequests { get => _cfg.RelaySignRequests; set { _cfg.RelaySignRequests = value; Raise(); } }
+    public string RelaySigningKey { get => _cfg.RelaySigningKey ?? ""; set { _cfg.RelaySigningKey = value; Raise(); } }
+    public int RelaySignVersion { get => _cfg.RelaySignVersion; set { _cfg.RelaySignVersion = value < 1 ? 1 : value; Raise(); } }
     public string GoogleIp      { get => _cfg.GoogleIp ?? ""; set { _cfg.GoogleIp = value; Raise(); } }
     public string ListenHost    { get => _cfg.ListenHost;     set { _cfg.ListenHost = value; Raise(); } }
     public bool   AllowLan
@@ -507,6 +525,47 @@ public class MainViewModel : ObservableBase
             Raise();
         }
     }
+    public string DomainRoutingProfilesText
+    {
+        get
+        {
+            var map = _cfg.DomainRoutingProfiles ?? new Dictionary<string, string>();
+            return string.Join(Environment.NewLine, map
+                .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(kv => $"{kv.Key}={kv.Value}"));
+        }
+        set
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var raw in (value ?? "").Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith("#")) continue;
+                var idx = line.IndexOf('=');
+                if (idx <= 0 || idx >= line.Length - 1) continue;
+                var host = NormalizeHostRuleKeepWildcard(line.Substring(0, idx));
+                var profile = line.Substring(idx + 1).Trim().ToLowerInvariant();
+                if (host.Length == 0) continue;
+                if (profile == "auto")
+                {
+                    map.Remove(host);
+                    continue;
+                }
+                if (profile is not ("direct-only" or "relay-only" or "no-mitm" or "direct-bypass" or "force-relay"))
+                    continue;
+                map[host] = profile;
+            }
+            _cfg.DomainRoutingProfiles = map;
+            _cfg.BypassHosts = map.Where(x => x.Value is "direct-only" or "direct-bypass").Select(x => x.Key).ToList();
+            _cfg.ForceRelayHosts = map.Where(x => x.Value is "relay-only" or "force-relay").Select(x => x.Key).ToList();
+            _cfg.NoMitmHosts = map.Where(x => x.Value == "no-mitm").Select(x => x.Key).ToList();
+            _cfg.DirectBypassDomains = _cfg.BypassHosts.Select(x => x.TrimStart('.')).ToList();
+            Raise();
+            Raise(nameof(DirectBypassDomainsText));
+            Raise(nameof(ForceRelayDomainsText));
+            Raise(nameof(NoMitmHostsText));
+        }
+    }
     public string NoMitmHostsText
     {
         get => string.Join(Environment.NewLine, _cfg.NoMitmHosts ?? new List<string>());
@@ -542,6 +601,15 @@ public class MainViewModel : ObservableBase
     public int HalfOpenRxTimeoutS { get => _cfg.HalfOpenRxTimeoutS; set { _cfg.HalfOpenRxTimeoutS = value; Raise(); } }
     public double HalfOpenProbeTimeoutS { get => _cfg.HalfOpenProbeTimeoutS; set { _cfg.HalfOpenProbeTimeoutS = value; Raise(); } }
     public int DcFailoverAttempts { get => _cfg.DcFailoverAttempts; set { _cfg.DcFailoverAttempts = value; Raise(); } }
+    public bool TelegramOptimizations { get => _cfg.TelegramOptimizations; set { _cfg.TelegramOptimizations = value; Raise(); } }
+    public bool TelegramForceDirect { get => _cfg.TelegramForceDirect; set { _cfg.TelegramForceDirect = value; Raise(); } }
+    public bool TelegramAllowRelayFallback { get => _cfg.TelegramAllowRelayFallback; set { _cfg.TelegramAllowRelayFallback = value; Raise(); } }
+    public bool TelegramDisableBatch { get => _cfg.TelegramDisableBatch; set { _cfg.TelegramDisableBatch = value; Raise(); } }
+    public bool TelegramDisableFanout { get => _cfg.TelegramDisableFanout; set { _cfg.TelegramDisableFanout = value; Raise(); } }
+    public int TelegramMaxInflightRelays { get => _cfg.TelegramMaxInflightRelays; set { _cfg.TelegramMaxInflightRelays = value; Raise(); } }
+    public int MultiIdMinLiveEndpoints { get => _cfg.MultiIdMinLiveEndpoints; set { _cfg.MultiIdMinLiveEndpoints = value; Raise(); } }
+    public int TelegramMultiIdFailThreshold { get => _cfg.TelegramMultiIdFailThreshold; set { _cfg.TelegramMultiIdFailThreshold = value; Raise(); } }
+    public double TelegramMultiIdCooldownFactor { get => _cfg.TelegramMultiIdCooldownFactor; set { _cfg.TelegramMultiIdCooldownFactor = value; Raise(); } }
     public string UpdateChannel
     {
         get => string.IsNullOrWhiteSpace(_cfg.UpdateChannel) ? "stable" : _cfg.UpdateChannel;
@@ -981,6 +1049,7 @@ public class MainViewModel : ObservableBase
     public RelayCommand AnalyzeAndRecommendCmd { get; }
     public RelayCommand ResetSystemStateCmd { get; }
     public RelayCommand ToggleLanguageCmd { get; }
+    public RelayCommand ApplyTelegramOptimizedCmd { get; }
     public RelayCommand AddDeploymentCmd { get; }
     public RelayCommand RemoveDeploymentCmd { get; }
     public RelayCommand ApplyPresetCmd { get; }
@@ -996,6 +1065,26 @@ public class MainViewModel : ObservableBase
         Raise(nameof(HealthLabel));
         Raise(nameof(LastCheckLabel));
         Raise(nameof(Diagnostics));
+    }
+
+    void ApplyTelegramOptimizedProfile()
+    {
+        TelegramOptimizations = true;
+        TelegramForceDirect = true;
+        TelegramAllowRelayFallback = false;
+        TelegramDisableBatch = true;
+        TelegramDisableFanout = true;
+        TelegramMaxInflightRelays = 6;
+
+        MultiIdMinLiveEndpoints = 2;
+        TelegramMultiIdFailThreshold = 6;
+        TelegramMultiIdCooldownFactor = 0.60;
+
+        if (DcFailoverAttempts < 3) DcFailoverAttempts = 3;
+        if (HalfOpenRxTimeoutS > 20) HalfOpenRxTimeoutS = 20;
+        if (HalfOpenProbeTimeoutS > 1.5) HalfOpenProbeTimeoutS = 1.5;
+        if (TcpSendBuffer < 512 * 1024) TcpSendBuffer = 512 * 1024;
+        if (TcpRecvBuffer < 512 * 1024) TcpRecvBuffer = 512 * 1024;
     }
 
     async Task ResetSystemStateAsync()
@@ -1328,6 +1417,14 @@ public class MainViewModel : ObservableBase
         if (HalfOpenProbeTimeoutS > 10.0) HalfOpenProbeTimeoutS = 10.0;
         if (DcFailoverAttempts < 1) DcFailoverAttempts = 1;
         if (DcFailoverAttempts > 6) DcFailoverAttempts = 6;
+        if (TelegramMaxInflightRelays < 1) TelegramMaxInflightRelays = 1;
+        if (TelegramMaxInflightRelays > 32) TelegramMaxInflightRelays = 32;
+        if (MultiIdMinLiveEndpoints < 1) MultiIdMinLiveEndpoints = 1;
+        if (MultiIdMinLiveEndpoints > 8) MultiIdMinLiveEndpoints = 8;
+        if (TelegramMultiIdFailThreshold < 2) TelegramMultiIdFailThreshold = 2;
+        if (TelegramMultiIdFailThreshold > 24) TelegramMultiIdFailThreshold = 24;
+        if (TelegramMultiIdCooldownFactor < 0.25) TelegramMultiIdCooldownFactor = 0.25;
+        if (TelegramMultiIdCooldownFactor > 1.0) TelegramMultiIdCooldownFactor = 1.0;
         if (string.IsNullOrWhiteSpace(MultiIdStrategy))
             MultiIdStrategy = "balanced";
         Raise(nameof(RelayRoutingLabel));
@@ -1389,6 +1486,15 @@ public class MainViewModel : ObservableBase
         ScriptBlacklistTtlS = 240;
         RetrySafeAttempts = Math.Max(RetrySafeAttempts, 2);
         RetryBackoffBaseMs = 140;
+        TelegramOptimizations = true;
+        TelegramForceDirect = true;
+        TelegramAllowRelayFallback = false;
+        TelegramDisableBatch = true;
+        TelegramDisableFanout = true;
+        TelegramMaxInflightRelays = 6;
+        MultiIdMinLiveEndpoints = 2;
+        TelegramMultiIdFailThreshold = 6;
+        TelegramMultiIdCooldownFactor = 0.60;
 
         AutoGoogleIpRefresh = true;
         GoogleIpRefreshIntervalS = 420;

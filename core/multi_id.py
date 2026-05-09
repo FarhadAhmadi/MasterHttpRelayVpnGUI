@@ -79,6 +79,9 @@ class MultiIdDispatcher:
         cooldown=30.0,
         strategy="balanced",
         max_consecutive=2,
+        min_live_endpoints=1,
+        telegram_fail_threshold=5,
+        telegram_cooldown_factor=0.65,
     ):
         self._lock = threading.Lock()
         self._eps = [_Endpoint(s) for s in ids]
@@ -93,6 +96,11 @@ class MultiIdDispatcher:
         self._last_sid = ""
         self._consecutive = 0
         self._global_recent_errors = 0
+        self._min_live_endpoints = max(1, int(min_live_endpoints))
+        self._telegram_fail_threshold = max(1, int(telegram_fail_threshold))
+        self._telegram_cooldown_factor = max(
+            0.25, min(float(telegram_cooldown_factor), 1.0)
+        )
 
     @property
     def count(self):
@@ -189,12 +197,26 @@ class MultiIdDispatcher:
             ep.recent_failures += 1
             self._global_recent_errors = min(self._global_recent_errors + 1, 1000)
             ep.last_err = msg[:180] if msg else ""
-            if ep.recent_failures >= self._fail_threshold:
+            profile = current_request_profile()
+            threshold = self._fail_threshold
+            cooldown_factor = 1.0
+            if profile == "telegram":
+                threshold = max(self._fail_threshold, self._telegram_fail_threshold)
+                cooldown_factor = self._telegram_cooldown_factor
+
+            if ep.recent_failures >= threshold:
+                now = time.monotonic()
+                live = [e for e in self._eps if e.parked_until <= now]
+                # Keep a minimum live pool so heavy bursts do not park every endpoint.
+                if len(live) <= min(self._min_live_endpoints, len(self._eps)):
+                    ep.recent_failures = max(0, threshold - 1)
+                    return
                 # Adaptive cooldown based on per-endpoint and global error pressure.
                 pressure = min(self._global_recent_errors / 20.0, 1.5)
-                endpoint_penalty = min(ep.recent_failures / max(self._fail_threshold, 1), 2.0)
+                endpoint_penalty = min(ep.recent_failures / max(threshold, 1), 2.0)
                 adaptive = self._cooldown * (0.75 + 0.35 * pressure + 0.25 * endpoint_penalty)
                 adaptive = max(8.0, min(adaptive, self._cooldown * 2.5))
+                adaptive = max(6.0, adaptive * cooldown_factor)
                 ep.parked_until = time.monotonic() + adaptive
                 log.warning("parking %s for %ds (%d failures)",
                             _short(ep.sid), int(adaptive), ep.recent_failures)
@@ -264,6 +286,7 @@ class MultiIdDispatcher:
 
 _dispatcher = None
 _request_sid = ContextVar("mrelay_request_sid", default="")
+_request_profile = ContextVar("mrelay_request_profile", default="default")
 
 
 def install(cfg):
@@ -284,6 +307,9 @@ def install(cfg):
         cooldown=float(cfg.get("multi_id_cooldown_seconds", 20.0)),
         strategy=cfg.get("multi_id_strategy", "balanced"),
         max_consecutive=int(cfg.get("multi_id_max_consecutive", 1)),
+        min_live_endpoints=int(cfg.get("multi_id_min_live_endpoints", 2)),
+        telegram_fail_threshold=int(cfg.get("telegram_multi_id_fail_threshold", 5)),
+        telegram_cooldown_factor=float(cfg.get("telegram_multi_id_cooldown_factor", 0.65)),
     )
 
     import domain_fronter
@@ -351,6 +377,21 @@ def snapshot():
 
 def current_request_id():
     return _request_sid.get("")
+
+
+def set_request_profile(profile: str):
+    return _request_profile.set((profile or "default").strip().lower())
+
+
+def reset_request_profile(token):
+    try:
+        _request_profile.reset(token)
+    except Exception:
+        pass
+
+
+def current_request_profile():
+    return _request_profile.get("default")
 
 
 def reset_runtime():

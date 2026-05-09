@@ -13,23 +13,28 @@ public class AppConfig
 {
     public static readonly string[] DefaultRelayIds =
     {
-        "AKfycbywYpxZaAU7w9szeU2Z2pT24tiqpac1Y0fXuF1bJzgKpdkT3EPofJIhcS9HapxwxLnu",
-        "AKfycbzwkuJaZx7PGcFuIEUTcs_Ux_wxTEe3rAZpQY0M6hSY31yDSvDKPhVyq6hjY7BoX4cq",
-        "AKfycbwRMoX_2zsIP3QUI8RF1AC2dPf3AgFUNmTKzEARsWrVSPA4tZuB45BEiZkxc0g66EmC",
-        "AKfycbxtSFeu-loescQ5Gu0g4YJh4nOuk94o-wAzS53Bo4GxAlAxWSIz7VrcgTrWUeGh-EOV",
-        "AKfycbxGHR6esfw-ix7vjnE0x1_R-6JJsRvc1a9i78-LEMDQpkN6NyLMCuMz_FJPCoRJNj0XvA",
-        "AKfycbxHK1J6Vx_Qg9if9EhcxPUcvKFbGzy6b2wZjJLwxdaSed2kL7FGkhsmeU51LHVwexEe",
-        "AKfycbymG-6pd795SzZLfbm1sLi8l1Xw_Fx0JqINYC6F_iuJ9eFN8KCcj2QSoPcE97cZoeEM",
-        "AKfycbzycg-5dmL6hwLgRMCXwUimk6YcVEMWidnYCySX5eZ7BO5I0Fc66QOPhYEMFXxMZlK8",
-        "AKfycbyVzgeXOv1fe1w77QTHfVf-eWvTC070jReOhdsTqMmK6StuH-wfYnpAJR196xw3JACUoA",
-        "AKfycbyF9h38JbbKOhPJo98UvJCH6HKglklLbrq7UzPtq5z2OMibOgx4yhSiLIqoF4SQB6QA",
-        "AKfycbxpfRwZW9LuSGVEhiIXDppeYWZkkHkZNwwT6hIIQ2-5y8ogED1jGSlK1uM4_s9PGpVcBg",
-        "AKfycby3DFO5gGfzwZaoqFaVc3o5viZoDLTGhkpihH4_bbbq_I9doLeV-xFMQcWSYWAyttnE",
-        "AKfycbzf5jRWZcKb_jrCB-_S6B-D5GGPV1uMIb5ANJtsxfcX5j7yZDx_5ZBuarrY-WrcmHQF",
-        "AKfycbwlcKFtRmjdD1ZuCuAQcnz4htu_o7ONXMPhd2VwZS8I-_J_d1_r1NTzWS8r2QQeYnb5kA",
-        "AKfycbwTF2qVoBSq8a9BcIz1w243OEDjvKefy3poLqqoYWfcCgjsSi6IZsfsLSEg_4R7EPyF",
-        "AKfycbwQ4iNFunOQmpbIBP0ekXsjqMKbiH2_HWQbsYuo5hrJj_04ghLg38iBzekqbl3TcAW0",
-        "AKfycbyZnyUDB-Lz75o69MAxQvfhrxbSmSNUf-bravwi7XwQSCinCnDFNM8Fd-61jISpYBTt"
+        // "AKfycbywYpxZaAU7w9szeU2Z2pT24tiqpac1Y0fXuF1bJzgKpdkT3EPofJIhcS9HapxwxLnu",
+        // "AKfycbzwkuJaZx7PGcFuIEUTcs_Ux_wxTEe3rAZpQY0M6hSY31yDSvDKPhVyq6hjY7BoX4cq",
+        // "AKfycbwRMoX_2zsIP3QUI8RF1AC2dPf3AgFUNmTKzEARsWrVSPA4tZuB45BEiZkxc0g66EmC",
+        // "AKfycbxtSFeu-loescQ5Gu0g4YJh4nOuk94o-wAzS53Bo4GxAlAxWSIz7VrcgTrWUeGh-EOV",
+        // "AKfycbxGHR6esfw-ix7vjnE0x1_R-6JJsRvc1a9i78-LEMDQpkN6NyLMCuMz_FJPCoRJNj0XvA",
+        // "AKfycbxHK1J6Vx_Qg9if9EhcxPUcvKFbGzy6b2wZjJLwxdaSed2kL7FGkhsmeU51LHVwexEe",
+        // "AKfycbymG-6pd795SzZLfbm1sLi8l1Xw_Fx0JqINYC6F_iuJ9eFN8KCcj2QSoPcE97cZoeEM",
+        // "AKfycbzycg-5dmL6hwLgRMCXwUimk6YcVEMWidnYCySX5eZ7BO5I0Fc66QOPhYEMFXxMZlK8",
+        // "AKfycbyVzgeXOv1fe1w77QTHfVf-eWvTC070jReOhdsTqMmK6StuH-wfYnpAJR196xw3JACUoA",
+        // "AKfycbyF9h38JbbKOhPJo98UvJCH6HKglklLbrq7UzPtq5z2OMibOgx4yhSiLIqoF4SQB6QA",
+        // "AKfycbxpfRwZW9LuSGVEhiIXDppeYWZkkHkZNwwT6hIIQ2-5y8ogED1jGSlK1uM4_s9PGpVcBg",
+        // "AKfycby3DFO5gGfzwZaoqFaVc3o5viZoDLTGhkpihH4_bbbq_I9doLeV-xFMQcWSYWAyttnE",
+        // "AKfycbzf5jRWZcKb_jrCB-_S6B-D5GGPV1uMIb5ANJtsxfcX5j7yZDx_5ZBuarrY-WrcmHQF",
+        // "AKfycbwlcKFtRmjdD1ZuCuAQcnz4htu_o7ONXMPhd2VwZS8I-_J_d1_r1NTzWS8r2QQeYnb5kA",
+        // "AKfycbwTF2qVoBSq8a9BcIz1w243OEDjvKefy3poLqqoYWfcCgjsSi6IZsfsLSEg_4R7EPyF",
+        // "AKfycbwQ4iNFunOQmpbIBP0ekXsjqMKbiH2_HWQbsYuo5hrJj_04ghLg38iBzekqbl3TcAW0",
+        // "AKfycbyZnyUDB-Lz75o69MAxQvfhrxbSmSNUf-bravwi7XwQSCinCnDFNM8Fd-61jISpYBTt"
+        //new version of code.gs
+        "AKfycbz_hhjOzk-TA_dk7jOzgOmeHArokMgKRdQxuN1LHJxaYgmZUIEEKFiP-ULpKhnD8ZYfeQ",
+        "AKfycbz5dMbDwFE7UfxbZ0VI2oDDR_9Qy7PfPyBn9UHDufpY4u7jt3LWrD5VLnChNAtjiR2L",
+        "AKfycbw6GhntNTbXgYpTFCf-HD2uX1ea1tbLWDAWpTyAvYTmnBQrjXR1XAMQ8M0Fvp1NzQSL2A",
+        "AKfycbx6YfMLIkNNTeoO4g4h2VkLwGY-e_bS97IyvMWANHa14ccHd8ejBfLLVy7cjS4UnhS9Uw"
     };
 
     [JsonPropertyName("mode")]            public string Mode { get; set; } = "apps_script";
@@ -47,19 +52,19 @@ public class AppConfig
         new RelayConfigItem { Id = DefaultRelayIds[1], Enabled = true },
         new RelayConfigItem { Id = DefaultRelayIds[2], Enabled = true },
         new RelayConfigItem { Id = DefaultRelayIds[3], Enabled = true },
-        new RelayConfigItem { Id = DefaultRelayIds[4], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[5], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[6], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[7], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[8], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[9], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[10], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[11], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[12], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[13], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[14], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[15], Enabled = false },
-        new RelayConfigItem { Id = DefaultRelayIds[16], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[4], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[5], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[6], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[7], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[8], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[9], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[10], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[11], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[12], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[13], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[14], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[15], Enabled = false },
+        // new RelayConfigItem { Id = DefaultRelayIds[16], Enabled = false },
         
     };
 
@@ -95,6 +100,9 @@ public class AppConfig
     [JsonPropertyName("watchdog_enabled")] public bool WatchdogEnabled { get; set; } = true;
     [JsonPropertyName("watchdog_failure_threshold")] public int WatchdogFailureThreshold { get; set; } = 4;
     [JsonPropertyName("watchdog_cooldown_s")] public int WatchdogCooldownS { get; set; } = 45;
+    [JsonPropertyName("relay_sign_requests")] public bool RelaySignRequests { get; set; } = false;
+    [JsonPropertyName("relay_signing_key")] public string RelaySigningKey { get; set; } = "";
+    [JsonPropertyName("relay_sign_version")] public int RelaySignVersion { get; set; } = 1;
 
     // Multi-ID tuning
     [JsonPropertyName("multi_id_fail_threshold")]   public int MultiIdFailThreshold { get; set; } = 2;
@@ -118,6 +126,15 @@ public class AppConfig
     [JsonPropertyName("half_open_rx_timeout_s")] public int HalfOpenRxTimeoutS { get; set; } = 20;
     [JsonPropertyName("half_open_probe_timeout_s")] public double HalfOpenProbeTimeoutS { get; set; } = 2.0;
     [JsonPropertyName("dc_failover_attempts")] public int DcFailoverAttempts { get; set; } = 2;
+    [JsonPropertyName("telegram_optimizations")] public bool TelegramOptimizations { get; set; } = true;
+    [JsonPropertyName("telegram_force_direct")] public bool TelegramForceDirect { get; set; } = true;
+    [JsonPropertyName("telegram_allow_relay_fallback")] public bool TelegramAllowRelayFallback { get; set; } = true;
+    [JsonPropertyName("telegram_disable_batch")] public bool TelegramDisableBatch { get; set; } = true;
+    [JsonPropertyName("telegram_disable_fanout")] public bool TelegramDisableFanout { get; set; } = true;
+    [JsonPropertyName("telegram_max_inflight_relays")] public int TelegramMaxInflightRelays { get; set; } = 8;
+    [JsonPropertyName("multi_id_min_live_endpoints")] public int MultiIdMinLiveEndpoints { get; set; } = 2;
+    [JsonPropertyName("telegram_multi_id_fail_threshold")] public int TelegramMultiIdFailThreshold { get; set; } = 5;
+    [JsonPropertyName("telegram_multi_id_cooldown_factor")] public double TelegramMultiIdCooldownFactor { get; set; } = 0.65;
     [JsonPropertyName("force_relay_hosts")] public List<string> ForceRelayHosts { get; set; } = new();
     [JsonPropertyName("domain_routing_profiles")] public Dictionary<string, string> DomainRoutingProfiles { get; set; } = new();
 

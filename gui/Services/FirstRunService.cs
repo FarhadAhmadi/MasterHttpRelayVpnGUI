@@ -85,6 +85,15 @@ public class FirstRunService
         if (cfg.MultiIdCooldownSeconds <= 0) cfg.MultiIdCooldownSeconds = 20;
         if (cfg.MultiIdMaxConsecutive <= 0) cfg.MultiIdMaxConsecutive = 1;
         if (string.IsNullOrWhiteSpace(cfg.MultiIdStrategy)) cfg.MultiIdStrategy = "fair_spread";
+        cfg.TelegramOptimizations = true;
+        cfg.TelegramForceDirect = true;
+        cfg.TelegramAllowRelayFallback = false;
+        cfg.TelegramDisableBatch = true;
+        cfg.TelegramDisableFanout = true;
+        if (cfg.TelegramMaxInflightRelays <= 0) cfg.TelegramMaxInflightRelays = 8;
+        if (cfg.MultiIdMinLiveEndpoints <= 0) cfg.MultiIdMinLiveEndpoints = 2;
+        if (cfg.TelegramMultiIdFailThreshold <= 0) cfg.TelegramMultiIdFailThreshold = 5;
+        if (cfg.TelegramMultiIdCooldownFactor <= 0) cfg.TelegramMultiIdCooldownFactor = 0.65;
         if (cfg.CacheDefaultTtlS <= 0) cfg.CacheDefaultTtlS = 900;
         if (cfg.CacheStaleIfErrorS < 0) cfg.CacheStaleIfErrorS = 240;
         if (cfg.CacheMaxMb <= 0) cfg.CacheMaxMb = 160;

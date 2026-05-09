@@ -11,6 +11,7 @@ import asyncio
 import functools
 import json
 import logging
+from urllib.parse import urlparse
 import sys
 import threading
 import time
@@ -113,10 +114,30 @@ def _patch_relay_health():
 
     orig = DF.relay
 
+    def _request_profile(url: str) -> str:
+        try:
+            host = (urlparse(url).hostname or "").lower().rstrip(".")
+        except Exception:
+            host = ""
+        if not host:
+            return "default"
+        if (
+            host == "telegram.org"
+            or host.endswith(".telegram.org")
+            or host == "t.me"
+            or host.endswith(".t.me")
+            or host.endswith(".telegram-cdn.org")
+            or host.endswith(".telesco.pe")
+            or host.endswith(".tdesktop.com")
+        ):
+            return "telegram"
+        return "default"
+
     @functools.wraps(orig)
     async def wrapped(self, method, url, headers, body):
         started = time.perf_counter()
         sid = ""
+        profile_token = multi_id.set_request_profile(_request_profile(url))
         try:
             resp = await orig(self, method, url, headers, body)
             sid = multi_id.current_request_id() or getattr(self, "script_id", "") or ""
@@ -135,6 +156,8 @@ def _patch_relay_health():
             health.record(False)
             multi_id.report_err(sid, str(e))
             raise
+        finally:
+            multi_id.reset_request_profile(profile_token)
 
     DF.relay = wrapped
 

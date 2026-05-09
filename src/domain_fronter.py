@@ -12,10 +12,12 @@ import asyncio
 import base64
 import codecs
 import hashlib
+import hmac
 import random
 import json
 import logging
 import re
+import secrets
 import socket
 import ssl
 import statistics
@@ -52,6 +54,15 @@ from constants import (
 )
 
 log = logging.getLogger("Fronter")
+
+
+class RelayProtocolError(RuntimeError):
+    """Structured relay-side error from Code.gs."""
+
+    def __init__(self, code: str, message: str, retryable: bool = False):
+        super().__init__(message)
+        self.code = str(code or "RELAY")
+        self.retryable = bool(retryable)
 
 
 @dataclass
@@ -150,6 +161,9 @@ class DomainFronter:
         self._stats_task: asyncio.Task | None = None
 
         self.auth_key = config.get("auth_key", "")
+        self._relay_signing_key = str(config.get("relay_signing_key", "") or "")
+        self._relay_sign_requests = bool(config.get("relay_sign_requests", False))
+        self._relay_sign_version = int(config.get("relay_sign_version", 1) or 1)
         self.verify_ssl = config.get("verify_ssl", True)
         self._relay_timeout = self._cfg_float(
             config, "relay_timeout", RELAY_TIMEOUT, minimum=1.0,
@@ -168,6 +182,12 @@ class DomainFronter:
         self._retry_backoff_base_ms = self._cfg_int(
             config, "retry_backoff_base_ms", 140, minimum=10,
         )
+        self._telegram_optimizations = bool(config.get("telegram_optimizations", True))
+        self._telegram_disable_fanout = bool(config.get("telegram_disable_fanout", True))
+        self._telegram_disable_batch = bool(config.get("telegram_disable_batch", True))
+        self._telegram_semaphore = asyncio.Semaphore(self._cfg_int(
+            config, "telegram_max_inflight_relays", 8, minimum=1,
+        ))
 
         # Connection pool — TTL-based, pre-warmed, with concurrency control
         self._pool: list[tuple[asyncio.StreamReader, asyncio.StreamWriter, float]] = []
@@ -600,6 +620,27 @@ class DomainFronter:
         parsed = urlparse(url_or_host if "://" in url_or_host else f"https://{url_or_host}")
         host = parsed.hostname or url_or_host
         return host.lower().rstrip(".")
+
+    @classmethod
+    def _is_telegram_host(cls, host: str) -> bool:
+        h = (host or "").lower().rstrip(".")
+        return (
+            h == "telegram.org"
+            or h.endswith(".telegram.org")
+            or h == "t.me"
+            or h.endswith(".t.me")
+            or h.endswith(".telegram-cdn.org")
+            or h.endswith(".telesco.pe")
+            or h.endswith(".tdesktop.com")
+        )
+
+    @classmethod
+    def _is_telegram_url(cls, url: str) -> bool:
+        try:
+            host = (urlparse(url).hostname or "").lower().rstrip(".")
+        except Exception:
+            host = ""
+        return cls._is_telegram_host(host)
 
     @classmethod
     def _coalesce_key(cls, url: str, headers: dict | None) -> str:
@@ -1332,11 +1373,16 @@ class DomainFronter:
         t0 = time.perf_counter()
         errored = False
         result: bytes = b""
+        is_telegram = self._telegram_optimizations and self._is_telegram_url(url)
         try:
             # Stateful/browser-navigation requests should preserve exact ordering
             # and header context; batching/coalescing is reserved for static fetches.
             if self._is_stateful_request(method, url, headers, body):
-                result = await self._relay_with_retry(payload)
+                if is_telegram:
+                    async with self._telegram_semaphore:
+                        result = await self._relay_with_retry(payload, is_telegram=True)
+                else:
+                    result = await self._relay_with_retry(payload)
                 return result
 
             # Coalesce concurrent GETs for the same URL.
@@ -1348,13 +1394,22 @@ class DomainFronter:
                     if k.lower() == "range":
                         has_range = True
                         break
-            if method == "GET" and not body and not has_range:
+            if method == "GET" and not body and not has_range and not (
+                is_telegram and self._telegram_disable_batch
+            ):
                 result = await self._coalesced_submit(
                     self._coalesce_key(url, headers), payload,
                 )
                 return result
 
-            result = await self._batch_submit(payload)
+            if is_telegram:
+                async with self._telegram_semaphore:
+                    if self._telegram_disable_batch:
+                        result = await self._relay_with_retry(payload, is_telegram=True)
+                    else:
+                        result = await self._batch_submit(payload)
+            else:
+                result = await self._batch_submit(payload)
             return result
         except Exception:
             errored = True
@@ -1870,6 +1925,39 @@ class DomainFronter:
                 payload["ct"] = ct
         return payload
 
+    def _attach_relay_auth(self, payload: dict) -> dict:
+        """Attach static key and optional HMAC signature fields."""
+        full_payload = dict(payload)
+        full_payload["k"] = self.auth_key
+        if not self._relay_sign_requests:
+            return full_payload
+
+        ts = int(time.time())
+        nonce = secrets.token_hex(12)
+        canonical = self._canonical_signature_payload(full_payload, ts, nonce)
+        sig = hmac.new(
+            self._relay_signing_key.encode("utf-8"),
+            canonical.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        full_payload["ts"] = ts
+        full_payload["nonce"] = nonce
+        full_payload["sig"] = sig
+        full_payload["v"] = self._relay_sign_version
+        return full_payload
+
+    @staticmethod
+    def _canonical_signature_payload(payload: dict, ts: int, nonce: str) -> str:
+        method = str(payload.get("m", "GET")).upper()
+        url = str(payload.get("u", ""))
+        body_b64 = str(payload.get("b", ""))
+        if "q" in payload and isinstance(payload.get("q"), list):
+            q_json = json.dumps(payload["q"], separators=(",", ":"))
+            body_hash = hashlib.sha256(q_json.encode("utf-8")).hexdigest()
+        else:
+            body_hash = hashlib.sha256(body_b64.encode("utf-8")).hexdigest()
+        return "\n".join([str(ts), nonce, method, url, body_hash])
+
     @classmethod
     def _is_static_asset_url(cls, url: str) -> bool:
         path = urlparse(url).path.lower()
@@ -2015,8 +2103,14 @@ class DomainFronter:
 
     # ── Core relay with retry ─────────────────────────────────────
 
-    async def _relay_with_retry(self, payload: dict) -> bytes:
+    async def _relay_with_retry(self, payload: dict, *,
+                                is_telegram: bool | None = None) -> bytes:
         """Single relay with one retry on failure. Uses H2 if available."""
+        if is_telegram is None:
+            is_telegram = (
+                self._telegram_optimizations
+                and self._is_telegram_url(str(payload.get("u", "")))
+            )
         attempts = self._retry_attempts_for_payload(payload)
         # Fan-out: race N Apps Script instances when enabled and H2 is up.
         # Cuts tail latency when one container is slow/cold. Only kicks in
@@ -2024,6 +2118,7 @@ class DomainFronter:
         if (attempts > 1
                 and self._parallel_relay > 1
                 and len(self._script_ids) > 1
+                and not (is_telegram and self._telegram_disable_fanout)
                 and self._h2_available()):
             try:
                 result = await asyncio.wait_for(
@@ -2137,8 +2232,7 @@ class DomainFronter:
         Uses the shared H2 connection — no pool checkout needed.
         Many concurrent calls all share one TLS connection.
         """
-        full_payload = dict(payload)
-        full_payload["k"] = self.auth_key
+        full_payload = self._attach_relay_auth(payload)
         json_body = json.dumps(full_payload).encode()
 
         path = self._exec_path(payload.get("u"))
@@ -2158,8 +2252,7 @@ class DomainFronter:
         Used by `_relay_fanout` to race multiple script IDs in parallel.
         Mirrors `_relay_single_h2` but ignores the stable-hash routing.
         """
-        full_payload = dict(payload)
-        full_payload["k"] = self.auth_key
+        full_payload = self._attach_relay_auth(payload)
         json_body = json.dumps(full_payload).encode()
 
         path = self._exec_path_for_sid(sid)
@@ -2174,9 +2267,7 @@ class DomainFronter:
 
     async def _relay_single(self, payload: dict) -> bytes:
         """Execute a single relay POST → redirect → parse."""
-        # Add auth key
-        full_payload = dict(payload)
-        full_payload["k"] = self.auth_key
+        full_payload = self._attach_relay_auth(payload)
         json_body = json.dumps(full_payload).encode()
 
         path = self._exec_path(payload.get("u"))
@@ -2238,10 +2329,7 @@ class DomainFronter:
 
     async def _relay_batch(self, payloads: list[dict]) -> list[bytes]:
         """Send multiple requests in one POST using Apps Script fetchAll."""
-        batch_payload = {
-            "k": self.auth_key,
-            "q": payloads,
-        }
+        batch_payload = self._attach_relay_auth({"m": "BATCH", "u": "batch://relay", "q": payloads})
         json_body = json.dumps(batch_payload).encode()
         path = self._exec_path(payloads[0].get("u") if payloads else None)
 
@@ -2527,7 +2615,23 @@ class DomainFronter:
     def _parse_relay_json(self, data: dict) -> bytes:
         """Convert a parsed relay JSON dict to raw HTTP response bytes."""
         if "e" in data:
-            return self._error_response(502, f"Relay error: {data['e']}")
+            code = str(data.get("c", "RELAY"))
+            msg = str(data.get("e", "Relay error"))
+            retryable = bool(data.get("retryable", False))
+            if retryable:
+                raise RelayProtocolError(code=code, message=msg, retryable=True)
+            status_map = {
+                "AUTH": 407,
+                "RATE_LIMIT": 429,
+                "BAD_URL": 400,
+                "BAD_SCHEME": 400,
+                "BAD_HOST": 400,
+                "DIRECT_ONLY": 421,
+                "SSRF_BLOCKED": 403,
+                "UPSTREAM": 502,
+            }
+            status = status_map.get(code, 502)
+            return self._error_response(status, f"Relay error [{code}]: {msg}")
 
         status = data.get("s", 200)
         resp_headers = data.get("h", {})
@@ -2608,6 +2712,7 @@ class DomainFronter:
         return (
             f"HTTP/1.1 {status} Error\r\n"
             f"Content-Type: text/html\r\n"
+            f"X-Relay-Error: 1\r\n"
             f"Content-Length: {len(body)}\r\n"
             f"\r\n"
             f"{body}"

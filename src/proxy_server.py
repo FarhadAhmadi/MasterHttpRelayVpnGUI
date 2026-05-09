@@ -437,6 +437,8 @@ class ProxyServer:
         self._direct_fail_until: dict[str, float] = {}
         self._relay_fail_until: dict[str, float] = {}
         self._relay_fail_streak: dict[str, int] = {}
+        self._relay_rate_limit_streak: dict[str, int] = {}
+        self._temp_direct_until: dict[str, float] = {}
         self._servers: list[asyncio.base_events.Server] = []
         self._client_tasks: set[asyncio.Task] = set()
         self._tcp_connect_timeout = self._cfg_float(
@@ -456,6 +458,10 @@ class ProxyServer:
         )
         self._dc_failover_attempts = self._cfg_int(
             config, "dc_failover_attempts", 2, minimum=1,
+        )
+        self._telegram_force_direct = bool(config.get("telegram_force_direct", True))
+        self._telegram_allow_relay_fallback = bool(
+            config.get("telegram_allow_relay_fallback", False)
         )
         self._download_min_size = self._cfg_int(
             config, "chunked_download_min_size", 5 * 1024 * 1024, minimum=0,
@@ -486,6 +492,15 @@ class ProxyServer:
         )
         self._relay_cb_cooldown = self._cfg_float(
             config, "relay_cb_cooldown", 20.0, minimum=1.0,
+        )
+        self._rate_limit_direct_threshold = self._cfg_int(
+            config, "rate_limit_direct_threshold", 3, minimum=1,
+        )
+        self._rate_limit_direct_base_cooldown = self._cfg_float(
+            config, "rate_limit_direct_base_cooldown", 45.0, minimum=5.0,
+        )
+        self._rate_limit_direct_max_cooldown = self._cfg_float(
+            config, "rate_limit_direct_max_cooldown", 300.0, minimum=30.0,
         )
         configured_direct_exclude = config.get("direct_google_exclude", [])
         self._direct_google_exclude = {
@@ -651,6 +666,41 @@ class ProxyServer:
     def _is_bypassed(self, host: str) -> bool:
         return self._host_matches_rules(host, self._bypass_hosts)
 
+    def _is_temp_direct_host(self, host: str) -> bool:
+        h = host.lower().rstrip(".")
+        until = self._temp_direct_until.get(h, 0.0)
+        now = time.time()
+        if until > now:
+            return True
+        if until:
+            self._temp_direct_until.pop(h, None)
+        return False
+
+    def _record_rate_limit(self, host: str) -> None:
+        h = host.lower().rstrip(".")
+        if not h:
+            return
+        streak = self._relay_rate_limit_streak.get(h, 0) + 1
+        self._relay_rate_limit_streak[h] = streak
+        if streak < self._rate_limit_direct_threshold:
+            return
+        step = streak - self._rate_limit_direct_threshold
+        ttl = min(
+            self._rate_limit_direct_base_cooldown * (2 ** step),
+            self._rate_limit_direct_max_cooldown,
+        )
+        self._temp_direct_until[h] = time.time() + ttl
+        log.warning(
+            "Adaptive direct fallback for %s: %.0fs (rate-limit streak=%d)",
+            h, ttl, streak,
+        )
+
+    def _record_relay_host_success(self, host: str) -> None:
+        h = host.lower().rstrip(".")
+        if not h:
+            return
+        self._relay_rate_limit_streak.pop(h, None)
+
     def _is_no_mitm_host(self, host: str) -> bool:
         return self._host_matches_rules(host, self._no_mitm_hosts)
 
@@ -691,6 +741,11 @@ class ProxyServer:
             or h.endswith(".telesco.pe")
             or h.endswith(".tdesktop.com")
         )
+
+    @staticmethod
+    def _is_telegram_web_host(host: str) -> bool:
+        h = host.lower().rstrip(".")
+        return h == "web.telegram.org"
 
     def _is_telegram_target(self, host: str) -> bool:
         return self._is_telegram_host(host) or self._ip_matches_no_mitm_cidr(host)
@@ -742,6 +797,7 @@ class ProxyServer:
         if success:
             self._relay_fail_streak.pop(h, None)
             self._relay_fail_until.pop(h, None)
+            self._record_relay_host_success(h)
             return
         streak = self._relay_fail_streak.get(h, 0) + 1
         self._relay_fail_streak[h] = streak
@@ -1034,6 +1090,15 @@ class ProxyServer:
 
     async def _fetch_uncached(self, host: str, method: str, url: str,
                               headers: dict | None, body: bytes) -> bytes:
+        if self._is_temp_direct_host(host):
+            err_body = b"Relay temporarily rate-limited for this host; retry shortly."
+            return (
+                b"HTTP/1.1 429 Too Many Requests\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Retry-After: 30\r\n"
+                b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
+                b"\r\n" + err_body
+            )
         if self._relay_temporarily_disabled(host):
             err_body = b"Relay temporarily unavailable for this host; retry shortly."
             log.warning("Relay circuit-open fast-fail: %s", host)
@@ -1049,6 +1114,18 @@ class ProxyServer:
             self._record_relay_result(host, success=True)
             return response
         except Exception as e:
+            msg = str(e)
+            if "RATE_LIMIT" in msg.upper() or "RATE LIMIT" in msg.upper():
+                self._record_rate_limit(host)
+                self._record_relay_result(host, success=False)
+                err_body = b"Relay rate limit reached; temporary adaptive fallback enabled."
+                return (
+                    b"HTTP/1.1 429 Too Many Requests\r\n"
+                    b"Content-Type: text/plain\r\n"
+                    b"Retry-After: 30\r\n"
+                    b"Content-Length: " + str(len(err_body)).encode() + b"\r\n"
+                    b"\r\n" + err_body
+                )
             self._record_relay_result(host, success=False)
             log.error("Relay error (%s): %s", url[:60], e)
             err_body = f"Relay error: {e}".encode()
@@ -1425,6 +1502,7 @@ class ProxyServer:
                                     reader: asyncio.StreamReader,
                                     writer: asyncio.StreamWriter):
         """Route a target connection through the Apps Script relay."""
+        is_telegram_web = self._is_telegram_web_host(host)
         # ── Block / bypass policy ─────────────────────────────────
         if self._is_blocked(host):
             log.warning("BLOCKED → %s:%d (matches block_hosts)", host, port)
@@ -1439,17 +1517,43 @@ class ProxyServer:
             log.info("Bypass tunnel → %s:%d (matches bypass_hosts)", host, port)
             await self._do_direct_tunnel(host, port, reader, writer)
             return
+        if self._is_temp_direct_host(host):
+            log.info("Adaptive direct fallback tunnel → %s:%d (rate-limit cooldown)", host, port)
+            await self._do_direct_tunnel(host, port, reader, writer)
+            return
         if self._is_no_mitm_host(host):
-            log.info("No-MITM tunnel → %s:%d (matches no_mitm_hosts)", host, port)
-            if self._is_telegram_target(host):
-                log.info("Telegram no-MITM route selected → %s:%d (host rule)", host, port)
-            await self._do_direct_tunnel(host, port, reader, writer)
-            return
+            if is_telegram_web and port in (80, 443):
+                log.info(
+                    "Telegram Web host matched no-MITM, but allowing relay path → %s:%d",
+                    host, port,
+                )
+            else:
+                log.info("No-MITM tunnel → %s:%d (matches no_mitm_hosts)", host, port)
+                if self._is_telegram_target(host):
+                    log.info("Telegram no-MITM route selected → %s:%d (host rule)", host, port)
+                await self._do_direct_tunnel(host, port, reader, writer)
+                return
         if self._ip_matches_no_mitm_cidr(host):
-            log.info("No-MITM tunnel → %s:%d (matches no_mitm_cidrs)", host, port)
-            log.info("Telegram no-MITM route selected → %s:%d (CIDR rule)", host, port)
-            await self._do_direct_tunnel(host, port, reader, writer)
-            return
+            if is_telegram_web and port in (80, 443):
+                log.info(
+                    "Telegram Web IP matched no-MITM CIDR, but allowing relay path → %s:%d",
+                    host, port,
+                )
+            else:
+                log.info("No-MITM tunnel → %s:%d (matches no_mitm_cidrs)", host, port)
+                log.info("Telegram no-MITM route selected → %s:%d (CIDR rule)", host, port)
+                await self._do_direct_tunnel(host, port, reader, writer)
+                return
+
+        if self._telegram_force_direct and self._is_telegram_host(host) and not is_telegram_web:
+            log.info("Telegram direct tunnel policy → %s:%d", host, port)
+            ok = await self._do_direct_tunnel(host, port, reader, writer, timeout=4.0)
+            if ok:
+                return
+            if not self._telegram_allow_relay_fallback:
+                log.warning("Telegram direct tunnel failed (relay fallback disabled) → %s:%d", host, port)
+                return
+            log.warning("Telegram direct tunnel fallback → %s:%d (switching to relay)", host, port)
 
         # Some cross-site auth/script hosts break when their responses are
         # relayed through Apps Script (MIME/ORB issues). Keep them direct-only.

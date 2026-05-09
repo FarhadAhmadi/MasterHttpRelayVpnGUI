@@ -478,6 +478,15 @@
                             <TextBlock Text="Bypass is useful for Cloudflare challenge-heavy websites."
                                        Style="{StaticResource Caption}" Margin="0,0,0,12"/>
 
+                            <TextBlock Text="Domain Routing Profiles (host=profile)" Style="{StaticResource SettingsLabel}"/>
+                            <TextBox Text="{Binding DomainRoutingProfilesText, UpdateSourceTrigger=PropertyChanged}"
+                                     Style="{StaticResource SettingsText}"
+                                     AcceptsReturn="True" Height="110"
+                                     VerticalScrollBarVisibility="Auto"
+                                     ToolTip="One per line. Profiles: auto, direct-only, relay-only, no-mitm. Example: web.telegram.org=relay-only"/>
+                            <TextBlock Text="Use profile mapping for precise per-domain behavior. 'auto' removes manual override."
+                                       Style="{StaticResource Caption}" Margin="0,0,0,12"/>
+
                             <TextBlock Text="Telegram No-MITM Hosts" Style="{StaticResource SettingsLabel}"/>
                             <TextBox Text="{Binding NoMitmHostsText, UpdateSourceTrigger=PropertyChanged}"
                                      Style="{StaticResource SettingsText}"
@@ -530,6 +539,84 @@
                                     <TextBox Text="{Binding HalfOpenProbeTimeoutS, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SettingsText}"/>
                                 </StackPanel>
                             </Grid>
+                            <Border BorderBrush="{StaticResource BorderBrush2}" BorderThickness="0,1,0,0"
+                                    Margin="0,2,0,12"/>
+                            <TextBlock Text="Telegram Optimizations" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                            <Button Content="Apply Recommended Telegram Profile"
+                                    Command="{Binding ApplyTelegramOptimizedCmd}"
+                                    Style="{StaticResource GhostButton}"
+                                    HorizontalAlignment="Left"
+                                    Padding="10,5"
+                                    Margin="0,0,0,10"/>
+                            <WrapPanel Margin="0,0,0,8">
+                                <CheckBox Content="Enable Telegram optimizations" IsChecked="{Binding TelegramOptimizations}" Margin="0,0,14,8"/>
+                                <CheckBox Content="Force direct path for Telegram" IsChecked="{Binding TelegramForceDirect}" Margin="0,0,14,8"/>
+                                <CheckBox Content="Allow relay fallback when direct fails" IsChecked="{Binding TelegramAllowRelayFallback}" Margin="0,0,14,8"/>
+                                <CheckBox Content="Disable relay batch for Telegram" IsChecked="{Binding TelegramDisableBatch}" Margin="0,0,14,8"/>
+                                <CheckBox Content="Disable relay fan-out for Telegram" IsChecked="{Binding TelegramDisableFanout}" Margin="0,0,14,8"/>
+                            </WrapPanel>
+                            <Grid Margin="0,0,0,12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="10"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="10"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="Telegram relay inflight cap" Style="{StaticResource SettingsLabel}"/>
+                                    <TextBox Text="{Binding TelegramMaxInflightRelays, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SettingsText}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Text="Min live relays (anti-park)" Style="{StaticResource SettingsLabel}"/>
+                                    <TextBox Text="{Binding MultiIdMinLiveEndpoints, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SettingsText}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="4">
+                                    <TextBlock Text="Telegram fail threshold" Style="{StaticResource SettingsLabel}"/>
+                                    <TextBox Text="{Binding TelegramMultiIdFailThreshold, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SettingsText}"/>
+                                </StackPanel>
+                            </Grid>
+                            <Grid Margin="0,0,0,12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="220"/>
+                                    <ColumnDefinition Width="10"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="Telegram cooldown factor (0.25-1.0)" Style="{StaticResource SettingsLabel}"/>
+                                    <TextBox Text="{Binding TelegramMultiIdCooldownFactor, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SettingsText}"/>
+                                </StackPanel>
+                            </Grid>
+                            <TextBlock Text="Recommended for Telegram Desktop: keep direct path on, fallback off, and cap relay inflight requests to avoid relay congestion."
+                                       Style="{StaticResource Caption}" Margin="0,0,0,12" TextWrapping="Wrap"/>
+
+                            <Border BorderBrush="{StaticResource BorderBrush2}" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,12">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="Relay Live Health" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding HealthLabel}" Style="{StaticResource Caption}"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="Endpoints" Style="{StaticResource Caption}"/>
+                                        <TextBlock Text="{Binding EndpointLabel}" FontWeight="SemiBold"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2">
+                                        <TextBlock Text="Active Relay" Style="{StaticResource Caption}"/>
+                                        <TextBlock Text="{Binding ActiveEndpointLabel}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="3">
+                                        <TextBlock Text="Success/Latency" Style="{StaticResource Caption}"/>
+                                        <TextBlock Text="{Binding SuccessRateLabel}" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding LatencyLabel}" Style="{StaticResource Caption}"/>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
 
                             <TextBlock Text="{Binding Loc[front_domain]}" Style="{StaticResource SettingsLabel}"/>
                             <TextBox Text="{Binding FrontDomain, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SettingsText}"
@@ -544,6 +631,29 @@
                             <TextBox Text="{Binding AuthKey, UpdateSourceTrigger=PropertyChanged}"
                                      FontFamily="Cascadia Mono, Consolas" Style="{StaticResource SettingsText}"
                                      ToolTip="Must match the secret configured in your relay backend."/>
+                            <CheckBox Content="Enable signed relay requests (HMAC)"
+                                      IsChecked="{Binding RelaySignRequests}"
+                                      Margin="0,6,0,6"
+                                      ToolTip="Turn on only after Code.gs SIGNING_KEY is configured."/>
+                            <Grid Margin="0,0,0,12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="10"/>
+                                    <ColumnDefinition Width="120"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="Relay signing key" Style="{StaticResource SettingsLabel}"/>
+                                    <TextBox Text="{Binding RelaySigningKey, UpdateSourceTrigger=PropertyChanged}"
+                                             FontFamily="Cascadia Mono, Consolas" Style="{StaticResource SettingsText}"
+                                             ToolTip="Must match SIGNING_KEY in Code.gs exactly."/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Text="Sign version" Style="{StaticResource SettingsLabel}"/>
+                                    <TextBox Text="{Binding RelaySignVersion, UpdateSourceTrigger=PropertyChanged}"
+                                             Style="{StaticResource SettingsText}"
+                                             ToolTip="Protocol version for relay signing. Keep at 1 unless both sides are updated."/>
+                                </StackPanel>
+                            </Grid>
 
                             <Grid Margin="0,0,0,12">
                                 <Grid.ColumnDefinitions>
