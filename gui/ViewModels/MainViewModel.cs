@@ -934,7 +934,10 @@ public class MainViewModel : ObservableBase
         if (_watchdogRestarting) return;
 
         var now = DateTime.UtcNow;
-        if (health.Reachable && _last.Health != "down")
+        // In filtered networks, browser captive-portal probes may fail even
+        // while the local proxy core is healthy. If local health probe is
+        // reachable, treat watchdog state as healthy and avoid restart loops.
+        if (health.Reachable)
         {
             _lastWatchdogSignalAt = now;
             _watchdogFailureStreak = 0;
@@ -1998,6 +2001,17 @@ public class MainViewModel : ObservableBase
 
     static readonly Regex _urlInParensRx = new(@"\((https?://[^)\s]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     static readonly Regex _respHostRx = new(@"RESP\s+[^\s]*\s+([a-z0-9.-]+\.[a-z]{2,})\s+status=", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    static readonly string[] _analyzerIgnoreHostSuffixes =
+    {
+        "detectportal.firefox.com",
+        "incoming.telemetry.mozilla.org",
+        "push.services.mozilla.com",
+        "ads.mozilla.org",
+        "ads-img.mozilla.org",
+        "img-getpocket.cdn.mozilla.net",
+        "prod-images.merino.prod.webservices.mozgcp.net",
+        "firefox.settings.services.mozilla.com",
+    };
 
     void TrackFailingHostFromLog(LogEntry e)
     {
@@ -2018,6 +2032,11 @@ public class MainViewModel : ObservableBase
 
         if (string.IsNullOrWhiteSpace(host)) return;
         host = host.Trim().ToLowerInvariant();
+        foreach (var ignored in _analyzerIgnoreHostSuffixes)
+        {
+            if (host == ignored || host.EndsWith("." + ignored, StringComparison.Ordinal))
+                return;
+        }
         _hostErrorCounts[host] = _hostErrorCounts.TryGetValue(host, out var n) ? n + 1 : 1;
     }
 

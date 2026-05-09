@@ -118,6 +118,7 @@ Supported profiles:
 Examples:
 
 - `web.telegram.org=relay-only`
+- `.web.telegram.org=relay-only`
 - `.cloudflare.com=direct-only`
 - `.telegram.org=no-mitm`
 
@@ -154,6 +155,7 @@ This reduces repeated failures and improves user experience during burst pressur
 - Usually a direct TLS path issue under filtering/DPI.
 - Try policy override:
   - `web.telegram.org=relay-only`
+  - `.web.telegram.org=relay-only`
 
 ### Frequent `429` relay errors
 
@@ -185,4 +187,3 @@ For every future relay change:
 
 - Architecture overview: `docs/ARCHITECTURE.md`
 - Operations overview: `docs/APP_OPERATIONS_GUIDE.md`
-

@@ -92,6 +92,7 @@ public class AppConfig
     [JsonPropertyName("script_blacklist_ttl_s")] public int ScriptBlacklistTtlS { get; set; } = 240;
     [JsonPropertyName("retry_safe_attempts")] public int RetrySafeAttempts { get; set; } = 2;
     [JsonPropertyName("retry_backoff_base_ms")] public int RetryBackoffBaseMs { get; set; } = 140;
+    [JsonPropertyName("parallel_relay")] public int ParallelRelay { get; set; } = 2;
     [JsonPropertyName("auto_google_ip_refresh")] public bool AutoGoogleIpRefresh { get; set; } = true;
     [JsonPropertyName("google_ip_refresh_interval_s")] public int GoogleIpRefreshIntervalS { get; set; } = 600;
     [JsonPropertyName("google_ip_probe_timeout_s")] public int GoogleIpProbeTimeoutS { get; set; } = 3;
@@ -117,6 +118,7 @@ public class AppConfig
     [JsonPropertyName("first_run_done")]  public bool FirstRunDone { get; set; } = false;
 
     [JsonPropertyName("hosts")]           public Dictionary<string, string> Hosts { get; set; } = new();
+    [JsonPropertyName("filtered_network_mode")] public bool FilteredNetworkMode { get; set; } = true;
     [JsonPropertyName("direct_bypass_domains")] public List<string> DirectBypassDomains { get; set; } = new();
     [JsonPropertyName("bypass_hosts")] public List<string> BypassHosts { get; set; } = new();
     [JsonPropertyName("no_mitm_hosts")] public List<string> NoMitmHosts { get; set; } = new();
@@ -127,16 +129,32 @@ public class AppConfig
     [JsonPropertyName("half_open_probe_timeout_s")] public double HalfOpenProbeTimeoutS { get; set; } = 2.0;
     [JsonPropertyName("dc_failover_attempts")] public int DcFailoverAttempts { get; set; } = 2;
     [JsonPropertyName("telegram_optimizations")] public bool TelegramOptimizations { get; set; } = true;
-    [JsonPropertyName("telegram_force_direct")] public bool TelegramForceDirect { get; set; } = true;
+    [JsonPropertyName("telegram_force_direct")] public bool TelegramForceDirect { get; set; } = false;
     [JsonPropertyName("telegram_allow_relay_fallback")] public bool TelegramAllowRelayFallback { get; set; } = true;
     [JsonPropertyName("telegram_disable_batch")] public bool TelegramDisableBatch { get; set; } = true;
     [JsonPropertyName("telegram_disable_fanout")] public bool TelegramDisableFanout { get; set; } = true;
-    [JsonPropertyName("telegram_max_inflight_relays")] public int TelegramMaxInflightRelays { get; set; } = 8;
+    [JsonPropertyName("telegram_max_inflight_relays")] public int TelegramMaxInflightRelays { get; set; } = 12;
     [JsonPropertyName("multi_id_min_live_endpoints")] public int MultiIdMinLiveEndpoints { get; set; } = 2;
     [JsonPropertyName("telegram_multi_id_fail_threshold")] public int TelegramMultiIdFailThreshold { get; set; } = 5;
     [JsonPropertyName("telegram_multi_id_cooldown_factor")] public double TelegramMultiIdCooldownFactor { get; set; } = 0.65;
-    [JsonPropertyName("force_relay_hosts")] public List<string> ForceRelayHosts { get; set; } = new();
-    [JsonPropertyName("domain_routing_profiles")] public Dictionary<string, string> DomainRoutingProfiles { get; set; } = new();
+    [JsonPropertyName("force_relay_hosts")] public List<string> ForceRelayHosts { get; set; } = new()
+    {
+        ".web.telegram.org",
+        "web.telegram.org",
+        "t.me",
+        ".t.me",
+        "telegram.me",
+        ".telegram.me",
+    };
+    [JsonPropertyName("domain_routing_profiles")] public Dictionary<string, string> DomainRoutingProfiles { get; set; } = new()
+    {
+        [".web.telegram.org"] = "relay-only",
+        ["web.telegram.org"] = "relay-only",
+        ["t.me"] = "relay-only",
+        [".t.me"] = "relay-only",
+        ["telegram.me"] = "relay-only",
+        [".telegram.me"] = "relay-only",
+    };
 
     [JsonPropertyName("update_channel")] public string UpdateChannel { get; set; } = "stable"; // stable|beta
     [JsonPropertyName("auto_update_check")] public bool AutoUpdateCheck { get; set; } = true;

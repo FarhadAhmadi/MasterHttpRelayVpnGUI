@@ -459,10 +459,17 @@ class ProxyServer:
         self._dc_failover_attempts = self._cfg_int(
             config, "dc_failover_attempts", 2, minimum=1,
         )
-        self._telegram_force_direct = bool(config.get("telegram_force_direct", True))
+        self._telegram_force_direct = bool(config.get("telegram_force_direct", False))
         self._telegram_allow_relay_fallback = bool(
-            config.get("telegram_allow_relay_fallback", False)
+            config.get("telegram_allow_relay_fallback", True)
         )
+        self._telegram_direct_fail_threshold = self._cfg_int(
+            config, "telegram_direct_fail_threshold", 2, minimum=1,
+        )
+        self._telegram_direct_fail_cooldown = self._cfg_float(
+            config, "telegram_direct_fail_cooldown_s", 180.0, minimum=10.0,
+        )
+        self._telegram_direct_fail_streak: dict[str, int] = {}
         self._download_min_size = self._cfg_int(
             config, "chunked_download_min_size", 5 * 1024 * 1024, minimum=0,
         )
@@ -530,6 +537,31 @@ class ProxyServer:
         self._bypass_hosts = self._load_host_rules(config.get("bypass_hosts", []))
         self._no_mitm_hosts = self._load_host_rules(config.get("no_mitm_hosts", []))
         self._no_mitm_cidrs = self._load_cidr_rules(config.get("no_mitm_cidrs", []))
+        self._force_relay_hosts = self._load_host_rules(config.get("force_relay_hosts", []))
+        self._filtered_network_mode = bool(config.get("filtered_network_mode", True))
+        if self._filtered_network_mode:
+            # Keep relay capacity focused on user traffic in heavily filtered
+            # networks by avoiding browser/vendor background probe noise.
+            self._merge_bypass_hosts([
+                "detectportal.firefox.com",
+                "incoming.telemetry.mozilla.org",
+                "push.services.mozilla.com",
+                "ads.mozilla.org",
+                "ads-img.mozilla.org",
+                "img-getpocket.cdn.mozilla.net",
+                "prod-images.merino.prod.webservices.mozgcp.net",
+                "firefox.settings.services.mozilla.com",
+            ])
+        self._telegram_relay_only_mode = bool(config.get("telegram_relay_only_mode", True))
+        if self._telegram_relay_only_mode:
+            self._merge_force_relay_hosts([
+                ".web.telegram.org",
+                "web.telegram.org",
+                "t.me",
+                ".t.me",
+                "telegram.me",
+                ".telegram.me",
+            ])
 
         # Route YouTube through the relay when requested; the Google frontend
         # IP can enforce SafeSearch on the SNI-rewrite path.
@@ -666,7 +698,46 @@ class ProxyServer:
     def _is_bypassed(self, host: str) -> bool:
         return self._host_matches_rules(host, self._bypass_hosts)
 
+    def _is_force_relay_host(self, host: str) -> bool:
+        return self._host_matches_rules(host, self._force_relay_hosts)
+
+    def _merge_bypass_hosts(self, hosts: list[str]) -> None:
+        exact, suffixes = self._bypass_hosts
+        merged_exact = set(exact)
+        merged_suffix = list(suffixes)
+        seen_suffix = set(suffixes)
+        for item in hosts:
+            h = str(item).strip().lower().rstrip(".")
+            if not h:
+                continue
+            if h.startswith("."):
+                if h not in seen_suffix:
+                    seen_suffix.add(h)
+                    merged_suffix.append(h)
+            else:
+                merged_exact.add(h)
+        self._bypass_hosts = (merged_exact, tuple(merged_suffix))
+
+    def _merge_force_relay_hosts(self, hosts: list[str]) -> None:
+        exact, suffixes = self._force_relay_hosts
+        merged_exact = set(exact)
+        merged_suffix = list(suffixes)
+        seen_suffix = set(suffixes)
+        for item in hosts:
+            h = str(item).strip().lower().rstrip(".")
+            if not h:
+                continue
+            if h.startswith("."):
+                if h not in seen_suffix:
+                    seen_suffix.add(h)
+                    merged_suffix.append(h)
+            else:
+                merged_exact.add(h)
+        self._force_relay_hosts = (merged_exact, tuple(merged_suffix))
+
     def _is_temp_direct_host(self, host: str) -> bool:
+        if self._is_telegram_web_host(host):
+            return False
         h = host.lower().rstrip(".")
         until = self._temp_direct_until.get(h, 0.0)
         now = time.time()
@@ -700,6 +771,21 @@ class ProxyServer:
         if not h:
             return
         self._relay_rate_limit_streak.pop(h, None)
+        self._telegram_direct_fail_streak.pop(h, None)
+
+    def _record_telegram_direct_failure(self, host: str) -> None:
+        h = host.lower().rstrip(".")
+        if not h:
+            return
+        streak = self._telegram_direct_fail_streak.get(h, 0) + 1
+        self._telegram_direct_fail_streak[h] = streak
+        if streak < self._telegram_direct_fail_threshold:
+            return
+        self._remember_direct_failure(h, ttl=int(self._telegram_direct_fail_cooldown))
+        log.warning(
+            "Telegram direct disabled for %.0fs after %d failures → %s",
+            self._telegram_direct_fail_cooldown, streak, h,
+        )
 
     def _is_no_mitm_host(self, host: str) -> bool:
         return self._host_matches_rules(host, self._no_mitm_hosts)
@@ -737,6 +823,8 @@ class ProxyServer:
             or h.endswith(".telegram.org")
             or h == "t.me"
             or h.endswith(".t.me")
+            or h == "telegram.me"
+            or h.endswith(".telegram.me")
             or h.endswith(".telegram-cdn.org")
             or h.endswith(".telesco.pe")
             or h.endswith(".tdesktop.com")
@@ -745,7 +833,7 @@ class ProxyServer:
     @staticmethod
     def _is_telegram_web_host(host: str) -> bool:
         h = host.lower().rstrip(".")
-        return h == "web.telegram.org"
+        return h == "web.telegram.org" or h.endswith(".web.telegram.org")
 
     def _is_telegram_target(self, host: str) -> bool:
         return self._is_telegram_host(host) or self._ip_matches_no_mitm_cidr(host)
@@ -1517,6 +1605,15 @@ class ProxyServer:
             log.info("Bypass tunnel → %s:%d (matches bypass_hosts)", host, port)
             await self._do_direct_tunnel(host, port, reader, writer)
             return
+        if self._is_force_relay_host(host):
+            log.info("Force-relay route → %s:%d (matches force_relay_hosts)", host, port)
+            if port == 443:
+                await self._do_mitm_connect(host, port, reader, writer)
+            elif port == 80:
+                await self._do_plain_http_tunnel(host, port, reader, writer)
+            else:
+                log.warning("Force-relay host on non-HTTP port (cannot relay): %s:%d", host, port)
+            return
         if self._is_temp_direct_host(host):
             log.info("Adaptive direct fallback tunnel → %s:%d (rate-limit cooldown)", host, port)
             await self._do_direct_tunnel(host, port, reader, writer)
@@ -1547,9 +1644,18 @@ class ProxyServer:
 
         if self._telegram_force_direct and self._is_telegram_host(host) and not is_telegram_web:
             log.info("Telegram direct tunnel policy → %s:%d", host, port)
+            if self._direct_temporarily_disabled(host):
+                log.info("Telegram relay fallback → %s:%d (direct temporarily disabled)", host, port)
+                if port == 443:
+                    await self._do_mitm_connect(host, port, reader, writer)
+                elif port == 80:
+                    await self._do_plain_http_tunnel(host, port, reader, writer)
+                return
             ok = await self._do_direct_tunnel(host, port, reader, writer, timeout=4.0)
             if ok:
+                self._telegram_direct_fail_streak.pop(host.lower().rstrip("."), None)
                 return
+            self._record_telegram_direct_failure(host)
             if not self._telegram_allow_relay_fallback:
                 log.warning("Telegram direct tunnel failed (relay fallback disabled) → %s:%d", host, port)
                 return
@@ -2219,6 +2325,18 @@ class ProxyServer:
 
                 log.info("MITM → %s %s", method, url)
 
+                # Apps Script relay is not a reliable transport for long-lived
+                # Telegram Web websocket channels (/apiws). Try a direct TLS
+                # websocket bridge first; if it fails, continue with normal
+                # relay handling so clients still get an HTTP-level fallback.
+                if (self._is_telegram_web_host(host)
+                        and path.startswith("/apiws")
+                        and self._is_websocket_upgrade(headers)):
+                    if await self._try_direct_ws_bridge(
+                        host, port, header_block, body, reader, writer,
+                    ):
+                        return
+
                 # ── CORS: extract relevant request headers ─────────────
                 origin = self._header_value(headers, "origin")
                 acr_method = self._header_value(
@@ -2288,6 +2406,71 @@ class ProxyServer:
             except Exception as e:
                 log.error("MITM handler error (%s): %s", host, e)
                 break
+
+    @staticmethod
+    def _is_websocket_upgrade(headers: dict) -> bool:
+        conn = str(headers.get("Connection", "")).lower()
+        upg = str(headers.get("Upgrade", "")).lower()
+        return ("upgrade" in conn) and (upg == "websocket")
+
+    async def _try_direct_ws_bridge(self, host: str, port: int,
+                                    header_block: bytes, body: bytes,
+                                    client_reader, client_writer) -> bool:
+        if port != 443:
+            return False
+        ssl_ctx_client = ssl.create_default_context()
+        if certifi is not None:
+            try:
+                ssl_ctx_client.load_verify_locations(cafile=certifi.where())
+            except Exception:
+                pass
+        if not self.fronter.verify_ssl:
+            ssl_ctx_client.check_hostname = False
+            ssl_ctx_client.verify_mode = ssl.CERT_NONE
+        try:
+            up_reader, up_writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    host, port, ssl=ssl_ctx_client, server_hostname=host,
+                ),
+                timeout=4.0,
+            )
+        except Exception as e:
+            log.debug("Telegram WS direct bridge connect failed (%s): %s", host, e)
+            return False
+        try:
+            up_writer.write(header_block + body)
+            await up_writer.drain()
+        except Exception as e:
+            log.debug("Telegram WS direct bridge send failed (%s): %s", host, e)
+            try:
+                up_writer.close()
+            except Exception:
+                pass
+            return False
+
+        log.info("Telegram WS direct bridge established → %s:%d", host, port)
+
+        async def pipe(src, dst):
+            try:
+                while True:
+                    data = await src.read(65536)
+                    if not data:
+                        break
+                    dst.write(data)
+                    await dst.drain()
+            except Exception:
+                pass
+            finally:
+                try:
+                    dst.close()
+                except Exception:
+                    pass
+
+        await asyncio.gather(
+            pipe(client_reader, up_writer),
+            pipe(up_reader, client_writer),
+        )
+        return True
 
     # ── CORS helpers ──────────────────────────────────────────────
 
